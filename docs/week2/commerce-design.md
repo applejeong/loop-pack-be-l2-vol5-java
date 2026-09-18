@@ -35,17 +35,17 @@
 
 | Method/Path | 입력 | 성공 결과 | 대표 오류 | 주요 규칙 기대값 |
 |---|---|---|---|---|
-| GET /api-admin/v1/brands | page(query) | 200, 브랜드 목록 | 권한 없음 → 403 | 관리자만 접근 가능 |
+| GET /api-admin/v1/brands | page(query) | 200, 브랜드 목록 | 권한 없음 → 403 | 관리자만 접근 가능, 삭제된 브랜드도 포함(삭제 관리가 관리자 역할), 최신순(id 내림차순) |
 | POST /api-admin/v1/brands | name 등 브랜드 정보 | 201, 등록된 브랜드 | 정보 유효성 실패 → 400, 권한 없음 → 403 | 이름 필수(공백 불가), 100자 이내 |
 | GET /api-admin/v1/brands/{brandId} | brandId(path) | 200, 브랜드 상세 | 없음 → 404, 권한 없음 → 403 | - |
-| PUT /api-admin/v1/brands/{brandId} | brandId(path), 수정할 정보 | 200, 수정된 브랜드 | 없음 → 404, 유효성 실패 → 400 | - |
-| DELETE /api-admin/v1/brands/{brandId} | brandId(path) | 204 | 삭제되지 않은 연결 상품 존재(재고0 포함) → 409, 없음 → 404 | 연결 상품이 하나라도 남아있으면 거절 |
-| GET /api-admin/v1/products | brandId(query, optional), page | 200, 상품 목록 | 권한 없음 → 403 | - |
+| PUT /api-admin/v1/brands/{brandId} | brandId(path), name | 200, 수정된 브랜드 | 없거나 삭제됨 → 404, 유효성 실패 → 400 | 수정 대상은 이름뿐(Brand 의 유일한 속성), 생성과 같은 검증 규칙 적용 |
+| DELETE /api-admin/v1/brands/{brandId} | brandId(path) | 204 | 삭제되지 않은 연결 상품 존재(재고0 포함) → 409, 없거나 이미 삭제됨 → 404 | 연결 상품이 하나라도 남아있으면 거절, 논리 삭제 |
+| GET /api-admin/v1/products | brandId(query, optional), page | 200, 상품 목록 | 권한 없음 → 403 | 삭제된 상품도 포함, 최신순(id 내림차순) |
 | POST /api-admin/v1/products | brandId, name, price 등 | 201, 등록된 상품 | 브랜드 없음/삭제됨 → 404, 이름·가격 범위 실패 → 400 | 브랜드 존재·미삭제 확인 |
 | GET /api-admin/v1/products/{productId} | productId(path) | 200, 상품 상세 | 없음 → 404 | - |
-| PUT /api-admin/v1/products/{productId} | productId(path), 수정할 정보 | 200, 수정된 상품 | 없음 → 404, 유효성 실패 → 400 | 수정 시 브랜드는 유지(변경 불가) |
-| DELETE /api-admin/v1/products/{productId} | productId(path) | 204 | 없음 → 404 | 삭제 후 고객 조회·새 주문·새 좋아요에서 제외 |
-| PUT /api-admin/v1/products/{productId}/stock | productId(path), quantity | 200, 변경된 재고 | 음수 → 400, 없음 → 404 | 0 이상인 최종 수량으로 설정(증감이 아니라 절대값) |
+| PUT /api-admin/v1/products/{productId} | productId(path), name, price | 200, 수정된 상품 | 없거나 삭제됨 → 404, 유효성 실패 → 400 | 이름·가격만 수정, 브랜드는 고정(변경 불가), 재고는 별도 API |
+| DELETE /api-admin/v1/products/{productId} | productId(path) | 204 | 없거나 이미 삭제됨 → 404 | 논리 삭제, 삭제 후 고객 조회·새 주문·새 좋아요에서 제외 |
+| PUT /api-admin/v1/products/{productId}/stock | productId(path), quantity | 200, 변경된 재고 | 음수 → 400, 없거나 삭제됨 → 404 | 0 이상인 최종 수량으로 설정(증감이 아니라 절대값) |
 
 ---
 
@@ -59,16 +59,25 @@
 
 ---
 
-### 4-4.주문
+### 4-4.포인트
 
 | Method/Path | 입력 | 성공 결과 | 대표 오류 | 주요 규칙 기대값 |
 |---|---|---|---|---|
-| POST /api/v1/orders | items[{productId, quantity}], X-USER-ID(header) | 201, DRAFT 상태 주문(품목·수량·단가·합계 포함) | 식별 누락 → 401, 상품 없음/삭제됨 → 404, 수량 0 이하 → 400 | 생성 시점엔 재고 차감 없음, 중복 상품은 합산 또는 거절(정책 결정 필요) |
-| POST /api/v1/orders/{orderId}/confirm | orderId(path), X-USER-ID(header) | 200, CONFIRMED 상태 주문(결제액 포함) | 본인 주문 아님 → 404, DRAFT 아님(이미확정) → 409, 재고부족 → 409, 포인트부족 → 409 | 확정 시에만 재고·포인트 차감(재고→포인트→확정 순서), 실패 시 상태 변경 없음(롤백) |
+| POST /api/v1/points/charge | amount(body), X-USER-ID(header) | 200, 충전 후 잔액 | 식별 누락/없는 사용자 → 401, 금액 누락·타입 오류·0 이하·표현 범위 초과 → 400 | 충전액은 양의 정수, 검증 실패 시 기존 잔액 유지 |
+| GET /api/v1/points | X-USER-ID(header) | 200, 저장된 잔액 | 식별 누락/없는 사용자 → 401 | 충전한 적 없으면 0원으로 응답 |
+
+---
+
+### 4-5.주문
+
+| Method/Path | 입력 | 성공 결과 | 대표 오류 | 주요 규칙 기대값 |
+|---|---|---|---|---|
+| POST /api/v1/orders | items[{productId, quantity}], X-USER-ID(header) | 201, DRAFT 상태 주문(품목·수량·단가·합계 포함) | 식별 누락 → 401, 상품 없음/삭제됨 → 404, 수량 0 이하 → 400 | 생성 시점엔 재고 차감 없음, 중복 상품은 수량 합산, 생성 시점 단가를 OrderItem 에 스냅샷으로 저장 |
+| POST /api/v1/orders/{orderId}/confirm | orderId(path), X-USER-ID(header) | 200, CONFIRMED 상태 주문(결제액 포함) | 본인 주문 아님 → 404, DRAFT 아님(이미확정) → 409, 재고부족 → 409, 포인트부족 → 409 | 확정 시에만 재고·포인트 차감(재고→포인트→확정 순서), 결제액은 생성 시점 단가×수량의 합(재계산하지 않음), 합산된 총수량 기준으로 재고 확인, 실패 시 DRAFT 유지(롤백) |
 | GET /api/v1/orders | X-USER-ID(header) | 200, 내 주문 목록 | 식별 누락 → 401 | 본인 주문만 조회 |
 | GET /api/v1/orders/{orderId} | orderId(path), X-USER-ID(header) | 200, 주문 상세(품목·수량·금액·상태·결제액) | 본인 아님/없음 → 404 (구분하지 않음) | 본인 주문만 조회 |
 
-### 4-5.관리자 (주문)
+### 4-6.관리자 (주문)
 
 | Method/Path | 입력 | 성공 결과 | 대표 오류 | 주요 규칙 기대값 |
 |---|---|---|---|---|
@@ -238,3 +247,43 @@ AI와 설계 다듬기
 - 결론: /api/** 경로만 CSRF 보호를 해제. 고객 API 는 X-USER-ID 헤더로 식별하는
   stateless 경로라 쿠키를 노린 CSRF 의 대상이 아니기 때문. 쿠키 인증을 쓰는
   관리자 경로(/api-admin/**)의 CSRF 는 그대로 유지한다.
+
+### 6-10: 주문의 미확정 정책 3건 확정
+- 질문: 주문 구현 전, 계약에 정해지지 않은 항목 확인 요청
+- 검토 및 결론:
+    1. 중복 상품 처리 — 계약 표에 "합산 또는 거절(정책 결정 필요)"로 남아 있었음.
+       수량 합산으로 확정한다. 합산된 총수량을 기준으로 재고를 확인한다.
+       OrderFacadeTest 스켈레톤이 이미 합산을 전제로 작성되어 있어 코드 변경은 없고
+       문구만 갱신한다.
+    2. 결제액 계산 기준 — 생성 시점 단가로 확정한다. 과제 원문이 OrderItem 에
+       "상품 식별자·수량·단가"를 저장하도록 하고, 3장이 Order-OrderItem 의 필요
+       이유를 "주문 시점의 금액과 수량을 독립적으로 기록"으로 설명한 것이 곧
+       단가 스냅샷을 전제한 서술이었음. 확정 시점 가격을 쓰면 DRAFT 로 담아둔
+       사이 관리자가 가격을 바꿨을 때 결제액이 달라지는 문제가 생긴다.
+       확정 시점에 재고·포인트는 다시 확인하지만 가격은 재계산하지 않는다.
+    3. 주문 상태 — DRAFT / CONFIRMED 두 가지만 둔다. 과제 원문이 명시한 상태가
+       이 둘뿐이고 취소·실패 상태는 요구되지 않았다. 확정 실패(재고·포인트 부족)
+       시에는 예외만 던지고 상태를 바꾸지 않아 DRAFT 로 남는다.
+
+### 6-11: 관리자 CRUD 의 수정 범위와 삭제 방식 확정
+- 질문: 관리자 브랜드/상품 CRUD 와 삭제 경계 구현 요청. 계약에 "수정할 정보"
+  라고만 적혀 있어 수정 대상과 삭제 방식이 정해지지 않은 상태였음
+- 검토 및 결론:
+    1. 브랜드 수정 범위 — 이름만 수정한다. Brand 가 name 외의 속성을 갖지 않기
+       때문이다. 100자·공백 검증이 생성자와 중복되지 않도록 검증을 private
+       메서드로 빼고 생성자와 changeName 이 함께 재사용한다.
+    2. 상품 수정 범위 — 이름과 가격만 수정한다. 브랜드는 고정(변경 불가)이고,
+       재고는 PUT .../stock 으로 이미 분리되어 있으므로 제외한다.
+    3. 삭제 방식 — 논리 삭제(soft delete)를 택한다. 물리 삭제를 하면 이미 저장된
+       주문의 OrderItem 이 가리키는 상품이 사라져 과거 주문 내역을 복원할 수 없고,
+       Like 관계도 함께 끊어진다. BaseEntity 가 이미 deletedAt 과 delete() 를
+       제공하므로 이를 그대로 쓴다. 주문은 생성 시점 단가를 스냅샷으로 들고 있어
+       상품이 삭제되어도 금액 정보는 온전히 남는다(6-10 참조).
+    4. 브랜드 삭제 거절 조건 — 삭제되지 않은 연결 상품이 하나라도 있으면 409 로
+       거절한다. 재고가 0인 상품도 "삭제되지 않은 상품"이므로 거절 대상에 포함한다.
+       재고 0은 품절 상태일 뿐 상품이 사라진 것이 아니기 때문이다.
+    5. 삭제된 대상의 취급 — 고객 조회·새 주문·새 좋아요에서 제외하고, 수정·재고
+       변경의 대상으로도 사용하지 않는다(모두 404). 다만 관리자 목록 조회에는
+       포함한다. 무엇이 삭제되었는지 확인하는 것 자체가 관리자의 역할이기 때문이다.
+    6. 중복 삭제 — 이미 삭제된 대상을 다시 삭제하면 404 로 응답한다. 기존
+       findActiveBrand / getActiveProduct 가 삭제분을 404 로 다루는 것과 맞춘다.
