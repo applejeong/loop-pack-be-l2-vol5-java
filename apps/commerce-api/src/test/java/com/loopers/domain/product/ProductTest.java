@@ -109,6 +109,54 @@ class ProductTest {
         }
     }
 
+    @DisplayName("상품 정보를 수정할 때, ")
+    @Nested
+    class Update {
+        @DisplayName("이름과 가격이 유효하면, 둘 다 변경된다.")
+        @Test
+        void updatesNameAndPrice_whenBothAreValid() {
+            // arrange
+            Product product = new Product(1L, "루퍼스 티셔츠", new Price(1000L));
+
+            // act
+            product.update("새 이름", new Price(2000L));
+
+            // assert
+            assertThat(product.getName()).isEqualTo("새 이름");
+            assertThat(product.getPrice()).isEqualTo(new Price(2000L));
+        }
+
+        @DisplayName("수정해도 브랜드는 변경되지 않는다.")
+        @Test
+        void keepsBrand_whenUpdated() {
+            // arrange
+            Product product = new Product(1L, "루퍼스 티셔츠", new Price(1000L));
+
+            // act
+            product.update("새 이름", new Price(2000L));
+
+            // assert
+            assertThat(product.getBrandId()).isEqualTo(1L);
+        }
+
+        @DisplayName("이름이 비어있으면, BAD_REQUEST 예외가 발생하고 기존 값이 유지된다.")
+        @Test
+        void keepsValues_whenNameIsBlank() {
+            // arrange
+            Product product = new Product(1L, "루퍼스 티셔츠", new Price(1000L));
+
+            // act
+            CoreException result = assertThrows(CoreException.class, () -> {
+                product.update("   ", new Price(2000L));
+            });
+
+            // assert
+            assertThat(result.getErrorType()).isEqualTo(ErrorType.BAD_REQUEST);
+            assertThat(product.getName()).isEqualTo("루퍼스 티셔츠");
+            assertThat(product.getPrice()).isEqualTo(new Price(1000L));
+        }
+    }
+
     @DisplayName("상품을 삭제할 때, ")
     @Nested
     class Delete {

@@ -5,6 +5,10 @@ import com.loopers.domain.brand.BrandRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
+
+import java.util.List;
 import java.util.Optional;
 
 @RequiredArgsConstructor
@@ -20,5 +24,12 @@ public class BrandRepositoryImpl implements BrandRepository {
     @Override
     public Optional<Brand> findById(Long id) {
         return brandJpaRepository.findById(id);
+    }
+
+    @Override
+    public List<Brand> findAllForAdmin(int page, int size) {
+        return brandJpaRepository
+            .findAll(PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "id")))
+            .getContent();
     }
 }

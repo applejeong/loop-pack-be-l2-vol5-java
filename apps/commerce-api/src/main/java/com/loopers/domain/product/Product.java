@@ -31,16 +31,20 @@ public class Product extends BaseEntity {
         if (brandId == null) {
             throw new CoreException(ErrorType.BAD_REQUEST, "상품의 브랜드 식별자는 필수입니다.");
         }
-        if (name == null || name.isBlank()) {
-            throw new CoreException(ErrorType.BAD_REQUEST, "상품 이름은 비어있을 수 없습니다.");
-        }
-        if (name.length() > MAX_NAME_LENGTH) {
-            throw new CoreException(ErrorType.BAD_REQUEST, "상품 이름은 " + MAX_NAME_LENGTH + "자를 넘을 수 없습니다.");
-        }
         this.brandId = brandId;
-        this.name = name;
+        this.name = validateName(name);
         this.stock = new Stock(0);
         changePrice(price);
+    }
+
+    /**
+     * 이름과 가격만 수정한다. 브랜드는 고정이고 재고는 별도 경로로 변경한다.
+     * 검증에 실패하면 기존 값을 그대로 유지한다.
+     */
+    public void update(String name, Price price) {
+        String validatedName = validateName(name);
+        changePrice(price);
+        this.name = validatedName;
     }
 
     public void changePrice(Price price) {
@@ -48,6 +52,16 @@ public class Product extends BaseEntity {
             throw new CoreException(ErrorType.BAD_REQUEST, "상품 가격은 필수입니다.");
         }
         this.price = price;
+    }
+
+    private String validateName(String name) {
+        if (name == null || name.isBlank()) {
+            throw new CoreException(ErrorType.BAD_REQUEST, "상품 이름은 비어있을 수 없습니다.");
+        }
+        if (name.length() > MAX_NAME_LENGTH) {
+            throw new CoreException(ErrorType.BAD_REQUEST, "상품 이름은 " + MAX_NAME_LENGTH + "자를 넘을 수 없습니다.");
+        }
+        return name;
     }
 
     /**

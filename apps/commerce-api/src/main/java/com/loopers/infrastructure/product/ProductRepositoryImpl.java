@@ -51,6 +51,28 @@ public class ProductRepositoryImpl implements ProductRepository {
             .fetch();
     }
 
+    @Override
+    public List<Product> findAllForAdmin(Long brandId, int page, int size) {
+        return queryFactory
+            .selectFrom(product)
+            .where(brandIdEq(brandId))
+            .orderBy(product.id.desc())
+            .offset((long) page * size)
+            .limit(size)
+            .fetch();
+    }
+
+    @Override
+    public boolean existsActiveByBrandId(Long brandId) {
+        Integer found = queryFactory
+            .selectOne()
+            .from(product)
+            .where(product.brandId.eq(brandId), product.deletedAt.isNull())
+            .fetchFirst();
+
+        return found != null;
+    }
+
     private BooleanExpression brandIdEq(Long brandId) {
         return brandId == null ? null : product.brandId.eq(brandId);
     }

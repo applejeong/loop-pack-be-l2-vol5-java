@@ -8,7 +8,6 @@ import com.loopers.domain.product.Product;
 import com.loopers.domain.product.ProductService;
 import com.loopers.support.error.CoreException;
 import com.loopers.support.error.ErrorType;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -23,8 +22,13 @@ import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.BDDMockito.given;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
 @ExtendWith(MockitoExtension.class)
@@ -131,18 +135,72 @@ class ProductFacadeTest {
         }
     }
 
-    @Disabled("구현 전 - TDD Red 단계에서 기대값을 채운다.")
     @DisplayName("관리자가 상품을 등록할 때, ")
     @Nested
     class CreateProductAsAdmin {
         @DisplayName("브랜드가 존재하고 삭제되지 않았으면, 상품 등록에 위임한다.")
         @Test
         void delegatesToProductService_whenBrandExistsAndIsNotDeleted() {
+            // arrange
+            given(brandRepository.findById(1L)).willReturn(Optional.of(new Brand("루퍼스")));
+            given(productService.createProduct(eq(1L), eq("루퍼스 티셔츠"), any(Price.class)))
+                .willReturn(new Product(1L, "루퍼스 티셔츠", new Price(1000L)));
+
+            // act
+            ProductInfo result = productFacade.createProduct(1L, "루퍼스 티셔츠", 1000L);
+
+            // assert
+            assertThat(result.productName()).isEqualTo("루퍼스 티셔츠");
+            assertThat(result.brandName()).isEqualTo("루퍼스");
+            verify(productService).createProduct(eq(1L), eq("루퍼스 티셔츠"), any(Price.class));
         }
 
-        @DisplayName("브랜드가 없거나 삭제되었으면, NOT_FOUND 예외가 발생하고 상품은 등록되지 않는다.")
+        @DisplayName("브랜드가 없으면, NOT_FOUND 예외가 발생하고 상품은 등록되지 않는다.")
         @Test
-        void doesNotCreateProduct_whenBrandIsAbsentOrDeleted() {
+        void doesNotCreateProduct_whenBrandIsAbsent() {
+            // arrange
+            given(brandRepository.findById(1L)).willReturn(Optional.empty());
+
+            // act
+            CoreException result = assertThrows(CoreException.class, () -> {
+                productFacade.createProduct(1L, "루퍼스 티셔츠", 1000L);
+            });
+
+            // assert
+            assertThat(result.getErrorType()).isEqualTo(ErrorType.NOT_FOUND);
+            verify(productService, never()).createProduct(anyLong(), anyString(), any(Price.class));
+        }
+
+        @DisplayName("브랜드가 삭제되었으면, NOT_FOUND 예외가 발생하고 상품은 등록되지 않는다.")
+        @Test
+        void doesNotCreateProduct_whenBrandIsDeleted() {
+            // arrange
+            Brand deleted = new Brand("루퍼스");
+            deleted.delete();
+            given(brandRepository.findById(1L)).willReturn(Optional.of(deleted));
+
+            // act
+            CoreException result = assertThrows(CoreException.class, () -> {
+                productFacade.createProduct(1L, "루퍼스 티셔츠", 1000L);
+            });
+
+            // assert
+            assertThat(result.getErrorType()).isEqualTo(ErrorType.NOT_FOUND);
+            verify(productService, never()).createProduct(anyLong(), anyString(), any(Price.class));
+        }
+    }
+
+    @DisplayName("관리자가 상품을 삭제할 때, ")
+    @Nested
+    class DeleteProductAsAdmin {
+        @DisplayName("상품 삭제를 서비스에 위임한다.")
+        @Test
+        void delegatesToProductService() {
+            // act
+            productFacade.deleteProduct(1L);
+
+            // assert
+            verify(productService).deleteProduct(1L);
         }
     }
 

@@ -32,6 +32,29 @@ public class ProductService {
         return product;
     }
 
+    @Transactional
+    public Product createProduct(Long brandId, String name, Price price) {
+        return productRepository.save(new Product(brandId, name, price));
+    }
+
+    /**
+     * 이름과 가격만 수정한다. 브랜드는 고정이고 재고는 changeStock 으로 변경한다.
+     */
+    @Transactional
+    public Product updateProduct(Long productId, String name, Price price) {
+        Product product = findActiveProduct(productId);
+        product.update(name, price);
+        return product;
+    }
+
+    /**
+     * 논리 삭제한다. 주문·좋아요가 참조하는 레코드는 그대로 남는다.
+     */
+    @Transactional
+    public void deleteProduct(Long productId) {
+        findActiveProduct(productId).delete();
+    }
+
     /**
      * 존재하며 삭제되지 않은 상품을 반환한다.
      */
@@ -49,6 +72,14 @@ public class ProductService {
     public List<Product> getProducts(Long brandId, String sort, int page, int size) {
         ProductSortType sortType = ProductSortType.from(sort);
         return productRepository.findAll(brandId, sortType, page, size);
+    }
+
+    /**
+     * 관리자 목록 조회. 삭제된 상품도 포함한다.
+     */
+    @Transactional(readOnly = true)
+    public List<Product> getProductsForAdmin(Long brandId, int page, int size) {
+        return productRepository.findAllForAdmin(brandId, page, size);
     }
 
     /**

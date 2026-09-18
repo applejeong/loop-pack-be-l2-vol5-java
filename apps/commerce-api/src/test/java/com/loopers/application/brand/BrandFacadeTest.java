@@ -2,6 +2,7 @@ package com.loopers.application.brand;
 
 import com.loopers.domain.brand.Brand;
 import com.loopers.domain.brand.BrandRepository;
+import com.loopers.domain.product.ProductRepository;
 import com.loopers.support.error.CoreException;
 import com.loopers.support.error.ErrorType;
 import org.junit.jupiter.api.DisplayName;
@@ -26,6 +27,9 @@ class BrandFacadeTest {
 
     @Mock
     private BrandRepository brandRepository;
+
+    @Mock
+    private ProductRepository productRepository;
 
     @InjectMocks
     private BrandFacade brandFacade;
@@ -107,6 +111,96 @@ class BrandFacadeTest {
 
             // assert
             assertThat(result.getErrorType()).isEqualTo(ErrorType.NOT_FOUND);
+        }
+    }
+
+    @DisplayName("브랜드를 수정할 때, ")
+    @Nested
+    class UpdateBrand {
+        @DisplayName("유효한 이름이면, 해당 이름으로 변경된다.")
+        @Test
+        void changesName_whenNameIsValid() {
+            // arrange
+            given(brandRepository.findById(1L)).willReturn(Optional.of(new Brand("루퍼스")));
+
+            // act
+            Brand result = brandFacade.updateBrand(1L, "새 이름");
+
+            // assert
+            assertThat(result.getName()).isEqualTo("새 이름");
+        }
+
+        @DisplayName("삭제된 브랜드이면, NOT_FOUND 예외가 발생한다.")
+        @Test
+        void throwsNotFoundException_whenBrandIsDeleted() {
+            // arrange
+            Brand deleted = new Brand("루퍼스");
+            deleted.delete();
+            given(brandRepository.findById(1L)).willReturn(Optional.of(deleted));
+
+            // act
+            CoreException result = assertThrows(CoreException.class, () -> {
+                brandFacade.updateBrand(1L, "새 이름");
+            });
+
+            // assert
+            assertThat(result.getErrorType()).isEqualTo(ErrorType.NOT_FOUND);
+        }
+    }
+
+    @DisplayName("브랜드를 삭제할 때, ")
+    @Nested
+    class DeleteBrand {
+        @DisplayName("연결된 상품이 없으면, 논리 삭제된다.")
+        @Test
+        void deletesBrand_whenNoActiveProductRemains() {
+            // arrange
+            Brand brand = new Brand("루퍼스");
+            given(brandRepository.findById(1L)).willReturn(Optional.of(brand));
+            given(productRepository.existsActiveByBrandId(1L)).willReturn(false);
+
+            // act
+            brandFacade.deleteBrand(1L);
+
+            // assert
+            assertThat(brand.getDeletedAt()).isNotNull();
+            assertThat(brand.getName()).isEqualTo("루퍼스");
+        }
+
+        @DisplayName("삭제되지 않은 연결 상품이 남아 있으면, CONFLICT 예외가 발생하고 삭제되지 않는다.")
+        @Test
+        void throwsConflictException_whenActiveProductRemains() {
+            // arrange
+            Brand brand = new Brand("루퍼스");
+            given(brandRepository.findById(1L)).willReturn(Optional.of(brand));
+            given(productRepository.existsActiveByBrandId(1L)).willReturn(true);
+
+            // act
+            CoreException result = assertThrows(CoreException.class, () -> {
+                brandFacade.deleteBrand(1L);
+            });
+
+            // assert
+            assertThat(result.getErrorType()).isEqualTo(ErrorType.CONFLICT);
+            assertThat(brand.getDeletedAt()).isNull();
+        }
+
+        @DisplayName("이미 삭제된 브랜드이면, NOT_FOUND 예외가 발생하고 연결 상품을 확인하지 않는다.")
+        @Test
+        void throwsNotFoundException_whenAlreadyDeleted() {
+            // arrange
+            Brand deleted = new Brand("루퍼스");
+            deleted.delete();
+            given(brandRepository.findById(1L)).willReturn(Optional.of(deleted));
+
+            // act
+            CoreException result = assertThrows(CoreException.class, () -> {
+                brandFacade.deleteBrand(1L);
+            });
+
+            // assert
+            assertThat(result.getErrorType()).isEqualTo(ErrorType.NOT_FOUND);
+            verify(productRepository, never()).existsActiveByBrandId(1L);
         }
     }
 }

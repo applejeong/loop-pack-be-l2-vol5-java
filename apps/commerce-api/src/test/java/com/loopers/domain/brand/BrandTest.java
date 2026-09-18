@@ -98,4 +98,53 @@ class BrandTest {
             assertThat(brand.getDeletedAt()).isNull();
         }
     }
+
+    @DisplayName("브랜드 이름을 수정할 때, ")
+    @Nested
+    class ChangeName {
+        @DisplayName("유효한 이름이 주어지면, 해당 이름으로 변경된다.")
+        @Test
+        void changesName_whenNameIsValid() {
+            // arrange
+            Brand brand = new Brand("루퍼스");
+
+            // act
+            brand.changeName("새 이름");
+
+            // assert
+            assertThat(brand.getName()).isEqualTo("새 이름");
+        }
+
+        @DisplayName("이름이 비어있으면, BAD_REQUEST 예외가 발생하고 기존 이름이 유지된다.")
+        @Test
+        void keepsName_whenNameIsBlank() {
+            // arrange
+            Brand brand = new Brand("루퍼스");
+
+            // act
+            CoreException result = assertThrows(CoreException.class, () -> {
+                brand.changeName("   ");
+            });
+
+            // assert
+            assertThat(result.getErrorType()).isEqualTo(ErrorType.BAD_REQUEST);
+            assertThat(brand.getName()).isEqualTo("루퍼스");
+        }
+
+        @DisplayName("이름이 100자를 넘으면, BAD_REQUEST 예외가 발생하고 기존 이름이 유지된다.")
+        @Test
+        void keepsName_whenNameLengthExceedsMax() {
+            // arrange
+            Brand brand = new Brand("루퍼스");
+
+            // act
+            CoreException result = assertThrows(CoreException.class, () -> {
+                brand.changeName("가".repeat(101));
+            });
+
+            // assert
+            assertThat(result.getErrorType()).isEqualTo(ErrorType.BAD_REQUEST);
+            assertThat(brand.getName()).isEqualTo("루퍼스");
+        }
+    }
 }
