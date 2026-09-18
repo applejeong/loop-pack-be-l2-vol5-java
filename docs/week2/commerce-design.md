@@ -36,7 +36,7 @@
 | Method/Path | 입력 | 성공 결과 | 대표 오류 | 주요 규칙 기대값 |
 |---|---|---|---|---|
 | GET /api-admin/v1/brands | page(query) | 200, 브랜드 목록 | 권한 없음 → 403 | 관리자만 접근 가능 |
-| POST /api-admin/v1/brands | name 등 브랜드 정보 | 201, 등록된 브랜드 | 정보 유효성 실패 → 400, 권한 없음 → 403 | 이름 등 필수값 검증 |
+| POST /api-admin/v1/brands | name 등 브랜드 정보 | 201, 등록된 브랜드 | 정보 유효성 실패 → 400, 권한 없음 → 403 | 이름 필수(공백 불가), 100자 이내 |
 | GET /api-admin/v1/brands/{brandId} | brandId(path) | 200, 브랜드 상세 | 없음 → 404, 권한 없음 → 403 | - |
 | PUT /api-admin/v1/brands/{brandId} | brandId(path), 수정할 정보 | 200, 수정된 브랜드 | 없음 → 404, 유효성 실패 → 400 | - |
 | DELETE /api-admin/v1/brands/{brandId} | brandId(path) | 204 | 삭제되지 않은 연결 상품 존재(재고0 포함) → 409, 없음 → 404 | 연결 상품이 하나라도 남아있으면 거절 |
