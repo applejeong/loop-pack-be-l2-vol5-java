@@ -3,4 +3,10 @@ package com.loopers.infrastructure.product;
 import com.loopers.domain.product.Product;
 import org.springframework.data.jpa.repository.JpaRepository;
 
-public interface ProductJpaRepository extends JpaRepository<Product, Long> {}
+import java.util.Collection;
+import java.util.List;
+
+public interface ProductJpaRepository extends JpaRepository<Product, Long> {
+
+    List<Product> findAllByIdIn(Collection<Long> ids);
+}

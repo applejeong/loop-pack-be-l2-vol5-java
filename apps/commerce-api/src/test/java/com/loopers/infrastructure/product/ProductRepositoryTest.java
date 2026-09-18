@@ -1,12 +1,14 @@
 package com.loopers.infrastructure.product;
 
+import com.loopers.domain.like.Like;
 import com.loopers.domain.product.Price;
 import com.loopers.domain.product.Product;
 import com.loopers.domain.product.ProductRepository;
+import com.loopers.domain.product.ProductSortType;
+import com.loopers.infrastructure.like.LikeJpaRepository;
 import com.loopers.utils.DatabaseCleanUp;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -14,6 +16,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -22,16 +25,19 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ProductRepositoryTest {
 
     private final ProductRepository productRepository;
+    private final LikeJpaRepository likeJpaRepository;
     private final EntityManager entityManager;
     private final DatabaseCleanUp databaseCleanUp;
 
     @Autowired
     public ProductRepositoryTest(
         ProductRepository productRepository,
+        LikeJpaRepository likeJpaRepository,
         EntityManager entityManager,
         DatabaseCleanUp databaseCleanUp
     ) {
         this.productRepository = productRepository;
+        this.likeJpaRepository = likeJpaRepository;
         this.entityManager = entityManager;
         this.databaseCleanUp = databaseCleanUp;
     }
@@ -113,28 +119,117 @@ class ProductRepositoryTest {
         }
     }
 
-    @Disabled("구현 전 - TDD Red 단계에서 기대값을 채운다.")
     @DisplayName("상품 목록을 조회할 때, ")
     @Nested
     class FindAll {
         @DisplayName("삭제된 상품은 조회 결과에서 제외된다.")
         @Test
         void excludesDeletedProducts() {
+            // arrange
+            productRepository.save(new Product(1L, "살아있는 상품", new Price(1000L)));
+            Product target = new Product(1L, "삭제된 상품", new Price(1000L));
+            target.delete();
+            productRepository.save(target);
+
+            // act
+            List<Product> result = productRepository.findAll(null, ProductSortType.LATEST, 0, 10);
+
+            // assert
+            assertThat(result).hasSize(1);
+            assertThat(result.get(0).getName()).isEqualTo("살아있는 상품");
         }
 
         @DisplayName("브랜드로 필터하면, 해당 브랜드의 상품만 조회된다.")
         @Test
         void filtersByBrandId() {
+            // arrange
+            productRepository.save(new Product(1L, "1번 브랜드 상품", new Price(1000L)));
+            productRepository.save(new Product(2L, "2번 브랜드 상품", new Price(1000L)));
+
+            // act
+            List<Product> result = productRepository.findAll(2L, ProductSortType.LATEST, 0, 10);
+
+            // assert
+            assertThat(result).hasSize(1);
+            assertThat(result.get(0).getBrandId()).isEqualTo(2L);
         }
 
-        @DisplayName("정렬 조건(latest/price_asc/likes_desc)대로 정렬되어 조회된다.")
+        @DisplayName("가격 오름차순 정렬이면, 저렴한 상품이 먼저 조회된다.")
         @Test
-        void sortsBySortCondition() {
+        void sortsByPriceAsc() {
+            // arrange
+            productRepository.save(new Product(1L, "비싼 상품", new Price(3000L)));
+            productRepository.save(new Product(1L, "저렴한 상품", new Price(1000L)));
+
+            // act
+            List<Product> result = productRepository.findAll(null, ProductSortType.PRICE_ASC, 0, 10);
+
+            // assert
+            assertThat(result).extracting(Product::getName)
+                .containsExactly("저렴한 상품", "비싼 상품");
         }
 
-        @DisplayName("정렬 기준이 동률이면, 보조 정렬 기준으로 순서가 결정된다.")
+        @DisplayName("최신순 정렬이면, 나중에 등록된 상품이 먼저 조회된다.")
+        @Test
+        void sortsByLatest() {
+            // arrange
+            productRepository.save(new Product(1L, "먼저 등록", new Price(1000L)));
+            productRepository.save(new Product(1L, "나중에 등록", new Price(1000L)));
+
+            // act
+            List<Product> result = productRepository.findAll(null, ProductSortType.LATEST, 0, 10);
+
+            // assert
+            assertThat(result).extracting(Product::getName)
+                .containsExactly("나중에 등록", "먼저 등록");
+        }
+
+        @DisplayName("좋아요 많은 순 정렬이면, 좋아요 수가 많은 상품이 먼저 조회된다.")
+        @Test
+        void sortsByLikesDesc() {
+            // arrange
+            Product few = productRepository.save(new Product(1L, "좋아요 1개", new Price(1000L)));
+            Product many = productRepository.save(new Product(1L, "좋아요 2개", new Price(1000L)));
+            likeJpaRepository.save(new Like(1L, few.getId()));
+            likeJpaRepository.save(new Like(1L, many.getId()));
+            likeJpaRepository.save(new Like(2L, many.getId()));
+
+            // act
+            List<Product> result = productRepository.findAll(null, ProductSortType.LIKES_DESC, 0, 10);
+
+            // assert
+            assertThat(result).extracting(Product::getName)
+                .containsExactly("좋아요 2개", "좋아요 1개");
+        }
+
+        @DisplayName("정렬 기준이 동률이면, 식별자 역순으로 순서가 결정된다.")
         @Test
         void appliesSecondarySort_whenPrimarySortIsTied() {
+            // arrange
+            Product first = productRepository.save(new Product(1L, "같은 가격 A", new Price(1000L)));
+            Product second = productRepository.save(new Product(1L, "같은 가격 B", new Price(1000L)));
+
+            // act
+            List<Product> result = productRepository.findAll(null, ProductSortType.PRICE_ASC, 0, 10);
+
+            // assert
+            assertThat(result).extracting(Product::getId)
+                .containsExactly(second.getId(), first.getId());
+        }
+
+        @DisplayName("페이지 크기를 넘으면, 해당 페이지의 상품만 조회된다.")
+        @Test
+        void appliesPaging() {
+            // arrange
+            productRepository.save(new Product(1L, "상품 A", new Price(1000L)));
+            productRepository.save(new Product(1L, "상품 B", new Price(2000L)));
+            productRepository.save(new Product(1L, "상품 C", new Price(3000L)));
+
+            // act
+            List<Product> result = productRepository.findAll(null, ProductSortType.PRICE_ASC, 1, 2);
+
+            // assert
+            assertThat(result).extracting(Product::getName).containsExactly("상품 C");
         }
     }
 

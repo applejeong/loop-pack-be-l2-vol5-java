@@ -11,11 +11,16 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.BDDMockito.given;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 
 @ExtendWith(MockitoExtension.class)
 class ProductServiceTest {
@@ -26,43 +31,98 @@ class ProductServiceTest {
     @InjectMocks
     private ProductService productService;
 
-    @Disabled("구현 전 - TDD Red 단계에서 기대값을 채운다.")
     @DisplayName("상품 단건을 조회할 때, ")
     @Nested
     class GetProduct {
         @DisplayName("존재하는 상품이면, 해당 상품을 반환한다.")
         @Test
         void returnsProduct_whenProductExists() {
+            // arrange
+            Product product = new Product(1L, "루퍼스 티셔츠", new Price(1000L));
+            given(productRepository.findById(1L)).willReturn(Optional.of(product));
+
+            // act
+            Product result = productService.getActiveProduct(1L);
+
+            // assert
+            assertThat(result.getName()).isEqualTo("루퍼스 티셔츠");
         }
 
         @DisplayName("존재하지 않는 상품이면, NOT_FOUND 예외가 발생한다.")
         @Test
         void throwsNotFoundException_whenProductIsAbsent() {
+            // arrange
+            given(productRepository.findById(1L)).willReturn(Optional.empty());
+
+            // act
+            CoreException result = assertThrows(CoreException.class, () -> {
+                productService.getActiveProduct(1L);
+            });
+
+            // assert
+            assertThat(result.getErrorType()).isEqualTo(ErrorType.NOT_FOUND);
         }
 
         @DisplayName("삭제된 상품이면, NOT_FOUND 예외가 발생한다.")
         @Test
         void throwsNotFoundException_whenProductIsDeleted() {
+            // arrange
+            Product deleted = new Product(1L, "루퍼스 티셔츠", new Price(1000L));
+            deleted.delete();
+            given(productRepository.findById(1L)).willReturn(Optional.of(deleted));
+
+            // act
+            CoreException result = assertThrows(CoreException.class, () -> {
+                productService.getActiveProduct(1L);
+            });
+
+            // assert
+            assertThat(result.getErrorType()).isEqualTo(ErrorType.NOT_FOUND);
         }
     }
 
-    @Disabled("구현 전 - TDD Red 단계에서 기대값을 채운다.")
     @DisplayName("상품 목록을 조회할 때, ")
     @Nested
     class GetProducts {
-        @DisplayName("삭제된 상품은 목록에서 제외된다.")
+        @DisplayName("해석한 정렬 조건으로 저장소 조회에 위임한다.")
         @Test
-        void excludesDeletedProducts() {
+        void delegatesToRepository_withResolvedSortType() {
+            // arrange
+            given(productRepository.findAll(1L, ProductSortType.PRICE_ASC, 0, 20))
+                .willReturn(List.of(new Product(1L, "루퍼스 티셔츠", new Price(1000L))));
+
+            // act
+            List<Product> result = productService.getProducts(1L, "price_asc", 0, 20);
+
+            // assert
+            assertThat(result).hasSize(1);
+            verify(productRepository).findAll(1L, ProductSortType.PRICE_ASC, 0, 20);
         }
 
-        @DisplayName("지원하지 않는 정렬값이 주어지면, BAD_REQUEST 예외가 발생한다.")
+        @DisplayName("정렬값이 없으면, 최신순으로 조회한다.")
+        @Test
+        void usesLatest_whenSortIsAbsent() {
+            // arrange
+            given(productRepository.findAll(null, ProductSortType.LATEST, 0, 20)).willReturn(List.of());
+
+            // act
+            productService.getProducts(null, null, 0, 20);
+
+            // assert
+            verify(productRepository).findAll(null, ProductSortType.LATEST, 0, 20);
+        }
+
+        @DisplayName("지원하지 않는 정렬값이 주어지면, BAD_REQUEST 예외가 발생하고 조회하지 않는다.")
         @Test
         void throwsBadRequestException_whenSortIsNotSupported() {
-        }
+            // act
+            CoreException result = assertThrows(CoreException.class, () -> {
+                productService.getProducts(null, "price_desc", 0, 20);
+            });
 
-        @DisplayName("정렬 기준이 동률이면, 보조 정렬 기준이 적용된다.")
-        @Test
-        void appliesSecondarySort_whenPrimarySortIsTied() {
+            // assert
+            assertThat(result.getErrorType()).isEqualTo(ErrorType.BAD_REQUEST);
+            verify(productRepository, never()).findAll(any(), any(), anyInt(), anyInt());
         }
     }
 
