@@ -117,6 +117,24 @@ class OrderV1ApiE2ETest {
             assertThat(orderJpaRepository.findAll()).isEmpty();
         }
 
+        @DisplayName("삭제된 상품을 주문하면, 404 응답을 받고 주문이 저장되지 않는다.")
+        @Test
+        void returnsNotFound_whenProductIsDeleted() {
+            // arrange
+            Long userId = saveUser();
+            Product product = new Product(1L, "삭제된 상품", new Price(1000L));
+            product.delete();
+            Long productId = productJpaRepository.save(product).getId();
+
+            // act
+            ResponseEntity<ApiResponse<OrderV1Dto.OrderResponse>> response =
+                createOrder(userId, "[{\"productId\":" + productId + ",\"quantity\":2}]");
+
+            // assert
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+            assertThat(orderJpaRepository.findAll()).isEmpty();
+        }
+
         @DisplayName("수량이 0 이하이면, 400 응답을 받는다.")
         @Test
         void returnsBadRequest_whenQuantityIsNotPositive() {

@@ -324,6 +324,67 @@ class AdminCrudV1ApiE2ETest {
         }
     }
 
+    /**
+     * 설계 5-1 "관리자 변경 → 고객 조회" 대표 흐름을 한 테스트에서 끝까지 확인한다.
+     */
+    @DisplayName("관리자가 변경한 내용이 고객 조회에 반영될 때, ")
+    @Nested
+    class AdminChangeReflectsToCustomer {
+        @DisplayName("가격을 수정하면, 고객 상세 조회에 수정된 가격이 보인다.")
+        @Test
+        void reflectsChangedPrice() throws Exception {
+            // arrange
+            Long brandId = brandJpaRepository.save(new Brand("루퍼스")).getId();
+            Long productId = productJpaRepository.save(new Product(brandId, "티셔츠", new Price(4000L))).getId();
+
+            // act - 관리자가 4,000원 -> 5,000원으로 수정
+            adminPut("/api-admin/v1/products/" + productId, "{\"name\":\"티셔츠\",\"price\":5000}")
+                .andExpect(status().isOk());
+
+            // assert - 고객 상세에 반영
+            mockMvc.perform(get("/api/v1/products/" + productId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.price").value(5000));
+        }
+
+        @DisplayName("재고를 0으로 변경하면, 고객 상세 조회에 재고 0으로 보인다.")
+        @Test
+        void reflectsChangedStock() throws Exception {
+            // arrange
+            Long brandId = brandJpaRepository.save(new Brand("루퍼스")).getId();
+            Product product = new Product(brandId, "티셔츠", new Price(1000L));
+            product.changeStock(10);
+            Long productId = productJpaRepository.save(product).getId();
+
+            // act
+            adminPut("/api-admin/v1/products/" + productId + "/stock", "{\"quantity\":0}")
+                .andExpect(status().isOk());
+
+            // assert
+            mockMvc.perform(get("/api/v1/products/" + productId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.stockQuantity").value(0));
+        }
+
+        @DisplayName("상품을 등록하면, 고객 목록 조회에 새 상품이 나타난다.")
+        @Test
+        void reflectsCreatedProduct() throws Exception {
+            // arrange
+            Long brandId = brandJpaRepository.save(new Brand("루퍼스")).getId();
+
+            // act
+            adminPost("/api-admin/v1/products",
+                "{\"brandId\":" + brandId + ",\"name\":\"새 상품\",\"price\":1000}")
+                .andExpect(status().isCreated());
+
+            // assert
+            mockMvc.perform(get("/api/v1/products"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.length()").value(1))
+                .andExpect(jsonPath("$.data[0].productName").value("새 상품"));
+        }
+    }
+
     private ResultActions adminPost(String url, String body) throws Exception {
         return mockMvc.perform(post(url)
             .with(user("admin").roles("ADMIN")).with(csrf())
