@@ -2,12 +2,16 @@ package com.loopers.domain.product;
 
 import com.loopers.support.error.CoreException;
 import com.loopers.support.error.ErrorType;
+import jakarta.persistence.Embeddable;
 import lombok.Getter;
 
 @Getter
+@Embeddable
 public class Stock {
 
     private int quantity;
+
+    protected Stock() {}
 
     public Stock(int quantity) {
         changeQuantity(quantity);
