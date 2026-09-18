@@ -15,14 +15,13 @@ public class BrandFacade {
     private final BrandRepository brandRepository;
 
     @Transactional
-    public BrandInfo createBrand(String name) {
-        Brand brand = brandRepository.save(new Brand(name));
-        return BrandInfo.from(brand);
+    public Brand createBrand(String name) {
+        return brandRepository.save(new Brand(name));
     }
 
     @Transactional(readOnly = true)
-    public BrandInfo getBrand(Long id) {
-        return BrandInfo.from(findActiveBrand(id));
+    public Brand getBrand(Long id) {
+        return findActiveBrand(id);
     }
 
     /**

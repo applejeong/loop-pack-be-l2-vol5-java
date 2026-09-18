@@ -40,10 +40,10 @@ class BrandFacadeTest {
             given(brandRepository.save(any(Brand.class))).willAnswer(invocation -> invocation.getArgument(0));
 
             // act
-            BrandInfo result = brandFacade.createBrand("루퍼스");
+            Brand result = brandFacade.createBrand("루퍼스");
 
             // assert
-            assertThat(result.name()).isEqualTo("루퍼스");
+            assertThat(result.getName()).isEqualTo("루퍼스");
             verify(brandRepository).save(any(Brand.class));
         }
 
@@ -71,10 +71,10 @@ class BrandFacadeTest {
             given(brandRepository.findById(1L)).willReturn(Optional.of(new Brand("루퍼스")));
 
             // act
-            BrandInfo result = brandFacade.getBrand(1L);
+            Brand result = brandFacade.getBrand(1L);
 
             // assert
-            assertThat(result.name()).isEqualTo("루퍼스");
+            assertThat(result.getName()).isEqualTo("루퍼스");
         }
 
         @DisplayName("존재하지 않으면, NOT_FOUND 예외가 발생한다.")
