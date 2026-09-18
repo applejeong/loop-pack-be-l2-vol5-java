@@ -32,6 +32,14 @@ public class OrderService {
     }
 
     /**
+     * 관리자 조회. userId 가 null 이면 전체 주문을 최신순으로 반환한다.
+     */
+    @Transactional(readOnly = true)
+    public List<Order> getOrdersForAdmin(Long userId, int page, int size) {
+        return orderRepository.findAllForAdmin(userId, page, size);
+    }
+
+    /**
      * 확정에 실패하면 예외만 던지고 저장하지 않아 주문은 DRAFT 로 남는다.
      */
     @Transactional

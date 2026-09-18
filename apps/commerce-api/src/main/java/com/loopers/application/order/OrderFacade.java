@@ -67,6 +67,21 @@ public class OrderFacade {
         return OrderInfo.from(findOwnOrder(requesterId, orderId));
     }
 
+    /**
+     * 관리자 조회. ROLE_ADMIN 검사가 접근 경계이므로 소유권을 확인하지 않는다.
+     */
+    @Transactional(readOnly = true)
+    public List<OrderInfo> getOrdersForAdmin(Long userId, int page, int size) {
+        return orderService.getOrdersForAdmin(userId, page, size).stream()
+            .map(OrderInfo::from)
+            .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public OrderInfo getOrderForAdmin(Long orderId) {
+        return OrderInfo.from(orderService.getOrder(orderId));
+    }
+
     private OrderItem toOrderItem(OrderCommand.Item item) {
         Product product = productService.getActiveProduct(item.productId());
         return new OrderItem(item.productId(), item.quantity(), product.getPrice().getAmount());
