@@ -14,10 +14,10 @@
 --              quantity   = 100
 --              name       = 'product-{i}'
 --              created_at = updated_at = '2026-01-01 00:00:00' + ((i * 7919) % 10000) 분
---   likes    : 상품 i 마다 user_id 1 부터 k 개
---              k = 0            (i % 10 = 0)
---                = 500          (i % 1000 = 1)
---                = (i * 13) % 50 (그 외)
+--   likes    : 상품 i 마다 user_id 1 부터 k 개 (조건은 위에서부터 순서대로 적용)
+--              k = 500                 (i % 999 = 0)
+--                = 0                   (i % 11 = 0)
+--                = ((i * 13) % 47) + 1 (그 외)
 --   deleted_at 은 전부 NULL (좋아요 취소는 물리 삭제라 채워진 행을 만들지 않는다)
 
 -- MySQL 8 기본 재귀 깊이(1000)로는 10000 까지 못 가므로 세션 한정으로 올린다.
@@ -94,9 +94,9 @@ like_count AS (
     SELECT
         i,
         CASE
-            WHEN i % 10 = 0 THEN 0
-            WHEN i % 1000 = 1 THEN 500
-            ELSE (i * 13) % 50
+            WHEN i % 999 = 0 THEN 500
+            WHEN i % 11 = 0 THEN 0
+            ELSE ((i * 13) % 47) + 1
         END AS k
     FROM product_seq
 )
