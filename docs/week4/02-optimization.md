@@ -266,6 +266,7 @@ step2 10회: 0.0092, 0.0085, 0.0074, 0.0078, 0.0077, 0.0071, 0.0074, 0.0074, 0.0
 
 - 1회 호출 소요 시간은 재기동 후 첫 요청이거나 표본 1개라 참고값이다 (A 0.287초, B 0.075초, C 0.045초).
 - VU5 2·3회차에서 digest 요약 표가 10·6건 누락. 계정 기준 SELECT 는 1,500 이고, 3회차는 문장 이력으로 1,500건 확인.
+- step2 VU1 은 13:53 첫 실행을 버리고 14:50 에 재실행한 결과다. 첫 실행 기록은 남기지 않았다 (재실행 이유: 작업 세션이 끊겨(토큰 만료) 결과 확인을 이어가지 못함. 앱·DB 는 재기동하지 않았다).
 - `events_statements_history_long` consumer 는 baseline 측정 이후 컨테이너를 재시작하지 않아 YES 로 유지된 상태였다.
 
 ## step3: 브랜드 IN 조회 (step1·step2 누적)
@@ -279,6 +280,7 @@ step2 10회: 0.0092, 0.0085, 0.0074, 0.0078, 0.0077, 0.0071, 0.0074, 0.0074, 0.0
 - 테스트: `ProductFacadeTest` 의 `findById(1L)` 스텁을 `findAllByIdIn(eq(Set.of(1L)))` 로 교체 (`ReflectionTestUtils.setField` 로 Brand id 1L 설정). `AdminCrudV1ApiE2ETest.GetListsAsAdmin` 에 "브랜드 삭제 후 관리자 상품 목록에서 브랜드명이 그대로 나온다" 추가 (변경 전 코드도 만족하는 회귀 방지 테스트, IN 쿼리에 deleted_at 조건이 들어가면 실패). 삭제 브랜드명 노출·브랜드 없음 → null 을 직접 확인하는 단위 테스트는 추가하지 않았다.
 - 테스트 명령: `./gradlew :apps:commerce-api:test --tests '*Brand*' --tests '*Product*' --tests '*Like*' --tests '*ArchitectureTest'` BUILD SUCCESSFUL (77ba157 기준 실행, 165건 통과, 실패·오류·skip 0).
 - 측정 후 추가 (커밋 `2549586`, 아래 표에는 미포함): `ProductRepositoryTest.FindAll` 에 likes_desc 페이지 경계 테스트 "좋아요 많은 순 정렬은 페이지 안이 아니라 전체 기준으로 적용되어, 가장 늦게 저장된 상품이라도 좋아요가 가장 많으면 첫 페이지 첫 번째로 조회된다" (상품 3개, size 2, 좋아요 최다 상품을 마지막에 저장). 기존 동작 확인용이라 처음부터 통과. `./gradlew :apps:commerce-api:test --tests '*ProductRepositoryTest*'` FindAll 8건(기존 7 + 1) 통과, 실패·skip 0.
+- 측정 후 추가 (커밋 `9ea4562`, 아래 표에는 미포함): SQL 개수 테스트 `ProductFacadeSqlCountTest` 2건 (브랜드 7 가격순 1페이지, 필터 없는 가격순 1페이지 → Hibernate `Statistics.getPrepareStatementCount()` 3) 과 도우미 `SqlCounter` (통계를 런타임에 켜고 reset/count/disable, 테스트 끝에 끔). 데이터는 `@Sql` 로 측정 seed 를 그대로 사용 (seed 1회 약 1.5 ~ 2초). Red 확인: step3 이전 코드 `3916e4b` 를 임시 worktree 에 두고 같은 테스트를 돌려 필터 없음이 `expected: 3 / but was: 15` 로 실패, 브랜드 7 은 3 으로 통과. 현 코드(`1ca13e0`)에서는 2건 모두 3 으로 통과.
 
 | 테스트 클래스 | 실행 | 실패 | 오류 | skip |
 |---|---|---|---|---|
@@ -441,6 +443,7 @@ step3 10회: 0.0088, 0.0074, 0.0075, 0.0084, 0.0073, 0.0067, 0.0067, 0.0066, 0.0
 - 1회 호출 소요 시간은 재기동 후 첫 요청이거나 표본 1개라 참고값이다 (A 0.294초, B 0.083초, C 0.030초).
 - VU5 3회차 계정 기준 SELECT 1,502건 (기대 1,500). 초과 2건 중 1건은 digest 표의 `SELECT @@SESSION.transaction_read_only` 1건 (같은 회차 set_option 6,002 의 초과분 `SET character_set_results` 1건과 함께 나타나는 커넥션 초기화 문장) 으로 확인, 1건은 digest 표에 대응 행이 없어 미확인. 재측정하지 않았다. digest 3종 합계는 1,495 / 1,491 / 1,495 로 step2 VU5 와 같은 누락 양상.
 - VU1 1회차 com/Ping 1, VU5 1회차 com/Ping 5 (계정 카운터 표에만 나타나고 SQL 수에 넣지 않음).
+- 한계: 준비 50회를 버린 뒤에도 VU1 1회차가 2·3회차보다 느린 경향이 있다 (step3 avg 5.38 → 4.87 → 4.46, step2 5.14 → 4.32 → 4.21). mean 행은 1회차를 포함한 3회차 평균이다. 원인 후보는 재기동 직후 커넥션 풀이 연결을 만드는 중일 가능성이다 (step3 VU5 1회차 Ping 5). 준비 횟수를 늘려 사라지는지는 확인하지 않았다.
 - 폐기분 (`perf/step3/discarded-no-tx/`, env + A 4 + k6 VU1·VU5 4): `77ba157` 적용 전 `b2345e9` 에서 1회 측정한 결과. 브랜드 조회가 트랜잭션 없이 실행돼 요청당 commit 2 / set_option 8 이었고, VU5 mean 은 p50 5.58 ms / 808.42 req/s 였다 (현 step3 7.27 / 613.86). 트랜잭션 문장 4개 감소의 영향 가능성만 적어 두며, 양쪽 모두 1회씩 잰 결과라 차이를 단정하지 않는다. B·C 측정 전에 중단했다. 응답·EXPLAIN·계정 기준 SELECT 3 은 현 step3 과 같았다.
 - SQL 문장 이력을 남기는 performance_schema 설정(`setup_consumers` 의 `events_statements_history_long`)은 MySQL 8 기본값이 NO 이고 컨테이너를 재시작하면 NO 로 돌아간다. 측정 전 `ps-setup.sql` 로 YES 로 켜는데, baseline 측정 이후 MySQL 컨테이너를 재시작하지 않아 step3 에서도 켜기 전부터 YES 였다 (`perf/step3/A-sql.txt` 의 enabled_before = YES). 1회 호출 SQL 캡처(A·B·C-sql.txt)는 이 이력에서 읽는다.
 
