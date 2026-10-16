@@ -14,7 +14,6 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -130,10 +129,7 @@ public class ProductFacade {
             .map(Product::getBrandId)
             .collect(Collectors.toSet());
 
-        return brandIds.stream()
-            .map(brandId -> brandRepository.findById(brandId)
-                .map(brand -> Map.entry(brandId, brand.getName())))
-            .flatMap(Optional::stream)
-            .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+        return brandRepository.findAllByIdIn(brandIds).stream()
+            .collect(Collectors.toMap(Brand::getId, Brand::getName));
     }
 }

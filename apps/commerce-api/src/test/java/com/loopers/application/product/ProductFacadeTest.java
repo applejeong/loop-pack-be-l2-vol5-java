@@ -15,10 +15,12 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -55,7 +57,9 @@ class ProductFacadeTest {
             // arrange
             given(productService.getProducts(null, "latest", 0, 20))
                 .willReturn(List.of(new Product(1L, "루퍼스 티셔츠", new Price(1000L))));
-            given(brandRepository.findById(1L)).willReturn(Optional.of(new Brand("루퍼스")));
+            Brand brand = new Brand("루퍼스");
+            ReflectionTestUtils.setField(brand, "id", 1L);
+            given(brandRepository.findAllByIdIn(eq(Set.of(1L)))).willReturn(List.of(brand));
             given(likeService.countByProductIds(anyList())).willReturn(Map.of(0L, 5L));
 
             // act
