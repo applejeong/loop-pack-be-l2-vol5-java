@@ -367,4 +367,54 @@ AI와 설계 다듬기
        - 브랜드 삭제와 상품 등록의 동시 실행: 삭제된 브랜드에 상품이 등록되는 경합은
          다루지 않았다.
        - 교착(데드락) 상황, 잠금 대기 시간 초과, 대량 요청에서의 처리량은 측정하지 않았다.
+
+## 7. 4주차: 조회 성능과 캐시
+
+### 7-1. 조회 계약 (성능 개선 중에도 바꾸지 않음)
+4-1 의 GET /api/v1/products 계약을 코드 기준으로 구체화한 것이다. 인덱스·캐시 작업은 아래 계약을 유지한 채 진행한다.
+
+| 항목 | 계약 | 근거 |
+|---|---|---|
+| 파라미터 | brandId(query, 선택), sort(latest 기본 / price_asc / likes_desc), page(기본 0), size(기본 20) | ProductV1Controller.getProducts, ProductSortType.from |
+| 정렬 | latest: created_at DESC / price_asc: amount ASC / likes_desc: 좋아요 수 DESC. 세 정렬 모두 동점 시 id DESC (6-8) | ProductRepositoryImpl.findAll |
+| 노출 | deleted_at IS NULL 상품만 | ProductRepositoryImpl.findAll |
+| 응답 필드 | productId, productName, price, stockQuantity, brandId, brandName, likeCount. 사용자별 필드 없음, 전체 건수·페이지 정보 없음 | ProductV1Dto.ProductResponse |
+| 오류 | 잘못된 sort → 400, 파라미터 타입 오류 → 400, 없는 brandId → 200 빈 목록 | ProductSortType.from, ApiControllerAdvice |
+
+- 현재 동작 메모 (이번 과제에서 변경하지 않음):
+    - 삭제된 브랜드명이 응답될 수 있음 (브랜드 조회가 삭제 여부를 보지 않음)
+    - page/size 검증 없음
+
+### 7-2. 측정 대상
+- 요청: GET /api/v1/products?brandId=7&sort=price_asc&page=0&size=20
+- 예상 SQL 3개 (순서대로):
+    1. 상품 목록 — ProductRepositoryImpl.findAll (WHERE deleted_at IS NULL AND brand_id = ? ORDER BY amount ASC, id DESC LIMIT 20)
+    2. 좋아요 집계 — LikeJpaRepository.countGroupedByProductId (product_id IN (...) GROUP BY product_id, 1회)
+    3. 브랜드 조회 — ProductFacade.findBrandNames (brandId 필터 시 findById 1회)
+- 좋아요 집계 비용: likes 에 product_id 선두 인덱스 없음 (uk_likes_user_product 는 user_id 선두)
+- likes_desc 는 별도 기록: seed 후 1회 호출(브랜드 미지정, size 3) 117초. 정식 측정 아님.
+  정렬용 상관 서브쿼리가 상품 행마다 likes 를 세는 구조
+- 측정 도구·표본 수: 미정
+
+### 7-3. 측정 데이터
+- docker/mysql/seed/product-perf-seed.sql, product-perf-verify.sql (로컬 docker MySQL 전용, 앱 자동 실행 경로 아님)
+- 브랜드 100, 사용자 1000, 상품 10000, 좋아요 223,037 (공식 기반, 재실행 시 동일 결과)
+- 가격 동점의 id DESC 는 ProductRepositoryTest.appliesSecondarySort_whenPrimarySortIsTied 로 확인 (price_asc 만 커버)
+
+### 7-4. 캐시 범위
+- 미정
+
+### 7-5. 변경 책임 — 응답을 바꾸는 쓰기 경로
+무효화 방식은 미정. 아래 경로가 7-1 응답 필드를 바꾼다.
+
+| 쓰기 경로 | 진입점 | 바뀌는 응답 (추측) |
+|---|---|---|
+| 상품 가격·이름 수정 | PUT /api-admin/v1/products/{productId} | price, productName, price_asc 순서 |
+| 상품 생성·삭제 | POST /api-admin/v1/products, DELETE /api-admin/v1/products/{productId} | 목록 포함 여부, latest 순서 |
+| 브랜드 이름 변경·삭제 | PUT /api-admin/v1/brands/{brandId}, DELETE /api-admin/v1/brands/{brandId} | brandName, 삭제 시 연결 상품 목록 제외 |
+| 좋아요 등록·취소 (취소는 물리 삭제) | POST /api/v1/products/{productId}/likes, DELETE /api/v1/products/{productId}/likes | likeCount, likes_desc 순서 |
+| 재고 변경 (주문 확정, 관리자 재고 설정) | POST /api/v1/orders/{orderId}/confirm, PUT /api-admin/v1/products/{productId}/stock | stockQuantity |
+
+### 7-6. 장애 계약
+- 미정
        - 경쟁 테스트는 결과 불변식만 검증하며, 특정 교차 순서를 강제하지는 않는다.
