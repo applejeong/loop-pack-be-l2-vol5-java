@@ -1,1 +1,0 @@
-vus=5 iters=500 reqs=500 rps=191.83 avg=25.91 p50=25.06 p90=28.79 p95=31.16 max=61.01 http_failed=0 checks_pass=1000 checks_fail=0

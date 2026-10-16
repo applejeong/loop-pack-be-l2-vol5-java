@@ -31,7 +31,10 @@
     - 1회 호출: `ps-reset.sql` 로 초기화 → 호출 → `ps-capture.sql` 로 문장 목록(`SQL_TEXT`, 파라미터 채워진 형태)과 계정별 종류 카운터 기록.
     - k6 구간: `ps-round-capture.sql` 로 digest 기준 "상품 조회 SQL 3종 합계"(상품 목록 / 좋아요 집계 / 브랜드 조회)와 "그 외 SELECT"(application SELECT 총수 − 3종)를 나눠 기록. 요청당 SQL 수 = 3종 합계 ÷ 요청 수.
     - 부수 문장(`SET SESSION TRANSACTION READ ONLY/READ WRITE`, `SET autocommit`, `COMMIT`, `com/Ping`)은 JDBC·HikariCP 가 내는 것으로 SQL 개수에 넣지 않고 따로 적는다.
-- 응답 시간: k6 `scripts/k6-products.js` (shared-iterations, 200 과 20건 check). `scripts/k6-run.sh <VUS> <라벨> <단계 폴더>` 가 회차마다 준비 50회(결과 제외) → 카운터 초기화 → 측정 500회 → SQL 개수 캡처를 3회 반복하고, 결과와 실행 로그를 `perf/<단계 폴더>/k6-A-<라벨>-r{1,2,3}.*`, `k6-A-<라벨>-run.log` 에 저장한다 (같은 파일이 있으면 덮어쓰지 않고 멈춤). 이번 측정은 `k6-run.sh 1 vu1 baseline`, `k6-run.sh 5 vu5 baseline` 으로 실행했다. req/s 는 k6 `http_reqs.rate`.
+- 응답 시간: k6 `scripts/k6-products.js` (shared-iterations, 200 과 20건 check). `scripts/k6-run.sh <VUS> <라벨> <단계 폴더>` 가 회차마다 준비 50회(결과 제외) → 카운터 초기화 → 측정 500회 → SQL 개수 캡처를 3회 반복하고, 측정 1번(VU별)당 결과 2개를 `perf/<단계 폴더>/` 에 남긴다 (같은 파일이 있으면 덮어쓰지 않고 멈춤). 이번 측정은 `k6-run.sh 1 vu1 baseline`, `k6-run.sh 5 vu5 baseline` 으로 실행했다. req/s 는 k6 `http_reqs.rate`.
+    - `k6-A-<라벨>-summary.tsv`: 회차 1·2·3 행 + mean / min / max / range_pct 행. 열은 vus, iters, reqs, avg/p50/p90/p95/max(ms), req_s, http_fail, check_fail, 상품 조회 SQL 3종(sql_list, sql_like_agg, sql_brand)과 합계, other_select, sql_per_req.
+    - `k6-A-<라벨>-run.log`: 전체 실행 로그 (회차별 k6 한 줄 요약과 SQL 캡처 출력 포함). 회차별 중간 파일은 남기지 않는다.
+    - 요약 수치는 summary.tsv(스크립트 printf 반올림) 기준이다. mean 행의 백분위(p50·p90·p95)와 max 는 회차별 값의 평균이며, 전체 요청을 합친 백분위가 아니다.
 - 단계 폴더 규칙: 개선 전은 `baseline`, 개선 후는 적용한 순서대로 `step1`, `step2`, … 폴더에 같은 절차로 측정한다. 단계 폴더 안의 파일 이름은 접두어 없이 동일하다.
 - B 는 10회 순차 curl 로 재고, 1회가 60초를 넘으면 중단한다.
 - EXPLAIN / EXPLAIN ANALYZE 는 캡처한 실제 SQL 을 root 로 실행한다 (`baseline/A-explain.sql`, `baseline/B-explain.sql`).
@@ -85,7 +88,7 @@
 | 2 | Aggregate using temporary table | 18 | 1 | 20.3..20.3 |
 | 3 | Rows fetched before execution (const) | 1 | 1 | 0.000042 |
 
-### 3-4. A 응답 시간, VU 1명 (`perf/baseline/k6-A-vu1-r{1,2,3}.json/.txt/-sql.txt`)
+### 3-4. A 응답 시간, VU 1명 (`perf/baseline/k6-A-vu1-summary.tsv`, `k6-A-vu1-run.log`)
 
 회차마다 준비 50 + 측정 500. 단위 ms.
 
@@ -95,9 +98,9 @@
 | 2 | 22.09 | 22.04 | 23.05 | 23.33 | 27.87 | 44.89 | 0 | 0 | 1500 (500/500/500) | 0 | 3.000 |
 | 3 | 22.00 | 22.00 | 22.92 | 23.24 | 28.54 | 45.11 | 0 | 0 | 1500 (500/500/500) | 0 | 3.000 |
 
-회차 간 편차 (범위 ÷ 평균): avg 0.4%, p50 0.3%, p90 0.6%, p95 0.6%, max 31.3%, req/s 0.5%. 부수 문장 회차당 commit 1500, set_option 6000.
+회차 간 편차 (범위 ÷ 평균): avg 0.4%, p50 0.3%, p90 0.6%, p95 0.6%, max 31.2%, req/s 0.5%. 부수 문장 회차당 commit 1500, set_option 6000.
 
-### 3-5. A 응답 시간, VU 5명 (`perf/baseline/k6-A-vu5-r{1,2,3}.json/.txt/-sql.txt`)
+### 3-5. A 응답 시간, VU 5명 (`perf/baseline/k6-A-vu5-summary.tsv`, `k6-A-vu5-run.log`)
 
 | 회차 | avg | p50 | p90 | p95 | max | req/s | HTTP 실패 | check 실패 | 상품 조회 SQL 3종 | 그 외 SELECT | SQL ÷ 500 |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -191,11 +194,11 @@ EXPLAIN ANALYZE
 | 폴더 | 파일 | 내용 |
 |---|---|---|
 | `scripts/` | `ps-setup.sql`, `ps-reset.sql`, `ps-capture.sql`, `ps-round-capture.sql` | performance_schema 설정·초기화·캡처 SQL |
-| `scripts/` | `k6-products.js`, `k6-run.sh` | k6 스크립트, 회차 실행 스크립트 (단계 폴더를 인자로 받음) |
+| `scripts/` | `k6-products.js`, `k6-run.sh` | k6 스크립트, 회차 실행 스크립트 (단계 폴더를 인자로 받고 summary.tsv · run.log 를 만듦) |
 | `baseline/` | `env.txt` | 환경 기록 |
 | `baseline/` | `A-sql.txt`, `A-response.json`, `A-explain.sql`, `A-explain.txt` | A 1회 호출 SQL, 응답, EXPLAIN |
-| `baseline/` | `k6-A-vu1-r{1,2,3}.json/.txt/-sql.txt`, `k6-A-vu1-run.log` | VU 1명 회차별 k6 요약·한 줄 결과·SQL 개수, 실행 로그 |
-| `baseline/` | `k6-A-vu5-r{1,2,3}.json/.txt/-sql.txt`, `k6-A-vu5-run.log` | VU 5명 동일 |
+| `baseline/` | `k6-A-vu1-summary.tsv`, `k6-A-vu1-run.log` | VU 1명 회차별 지표·SQL 개수 표, 실행 로그 |
+| `baseline/` | `k6-A-vu5-summary.tsv`, `k6-A-vu5-run.log` | VU 5명 동일 |
 | `baseline/` | `B-sql.txt`, `B-response.json`, `B-explain.sql`, `B-explain.txt`, `B-10calls.txt`, `B-10calls-sql.txt` | B |
 | `baseline/` | `C-sql.txt`, `C-response.json` | C |
 
