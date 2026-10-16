@@ -231,6 +231,24 @@ class ProductRepositoryTest {
             // assert
             assertThat(result).extracting(Product::getName).containsExactly("상품 C");
         }
+
+        @DisplayName("좋아요 많은 순 정렬은 페이지 안이 아니라 전체 기준으로 적용되어, 가장 늦게 저장된 상품이라도 좋아요가 가장 많으면 첫 페이지 첫 번째로 조회된다.")
+        @Test
+        void sortsByLikesDescAcrossPages() {
+            // arrange
+            Product first = productRepository.save(new Product(1L, "좋아요 1개", new Price(1000L)));
+            productRepository.save(new Product(1L, "좋아요 0개", new Price(1000L)));
+            Product last = productRepository.save(new Product(1L, "좋아요 2개", new Price(1000L)));
+            likeJpaRepository.save(new Like(1L, first.getId()));
+            likeJpaRepository.save(new Like(1L, last.getId()));
+            likeJpaRepository.save(new Like(2L, last.getId()));
+
+            // act
+            List<Product> result = productRepository.findAll(null, ProductSortType.LIKES_DESC, 0, 2);
+
+            // assert
+            assertThat(result).extracting(Product::getName).containsExactly("좋아요 2개", "좋아요 1개");
+        }
     }
 
     @DisplayName("브랜드별 미삭제 상품을 조회할 때, ")
