@@ -1,5 +1,7 @@
 package com.loopers.config.cache;
 
+import com.loopers.config.redis.RedisNodeInfo;
+import com.loopers.config.redis.RedisProperties;
 import com.loopers.utils.RedisCleanUp;
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisURI;
@@ -10,10 +12,16 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import org.springframework.data.redis.core.RedisTemplate;
 
+import java.time.Duration;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * 상품 목록 캐시 전용 연결이 테스트 Redis 컨테이너(RedisTestContainersConfig 가 System property 로 알려준 주소)를
@@ -67,6 +75,44 @@ class ProductCacheRedisConfigTest {
         } finally {
             client.shutdown();
         }
+    }
+
+    @DisplayName("캐시 전용 연결의 연결 타임아웃은 500ms 다.")
+    @Test
+    void usesShortConnectTimeout() {
+        // act
+        LettuceConnectionFactory factory = (LettuceConnectionFactory) cacheRedisTemplate.getConnectionFactory();
+        Duration connectTimeout = factory.getClientConfiguration().getClientOptions().orElseThrow()
+            .getSocketOptions().getConnectTimeout();
+
+        // assert
+        assertThat(connectTimeout).isEqualTo(Duration.ofMillis(500));
+    }
+
+    @DisplayName("응답 없는 주소에 처음 연결하면, 연결 타임아웃 안에 실패해 요청이 오래 붙잡히지 않는다.")
+    @Test
+    void failsFastOnFirstConnect_whenAddressDoesNotRespond() {
+        // arrange: 192.0.2.0/24 는 문서용 예약 대역(RFC 5737)이라 응답이 오지 않는다
+        RedisProperties unreachable = new RedisProperties(0, new RedisNodeInfo("192.0.2.1", 6379), List.of());
+        ProductCacheRedisConfig config = new ProductCacheRedisConfig();
+        LettuceConnectionFactory factory = config.productCacheRedisConnectionFactory(unreachable);
+        factory.afterPropertiesSet();
+        factory.start();
+        RedisTemplate<String, String> template = config.productCacheRedisTemplate(factory);
+        template.afterPropertiesSet();
+
+        // act
+        long start = System.nanoTime();
+        try {
+            assertThrows(DataAccessException.class, () -> template.opsForValue().get("probe"));
+        } finally {
+            factory.destroy();
+        }
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+
+        // assert
+        System.out.printf("[연결 타임아웃] 응답 없는 주소 첫 연결 실패까지: %d ms%n", elapsedMs);
+        assertThat(elapsedMs).isLessThan(1_500L);
     }
 
     /**
