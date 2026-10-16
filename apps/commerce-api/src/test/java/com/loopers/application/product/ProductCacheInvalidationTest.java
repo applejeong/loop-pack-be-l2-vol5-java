@@ -4,6 +4,7 @@ import com.loopers.application.brand.BrandFacade;
 import com.loopers.application.like.LikeFacade;
 import com.loopers.application.order.OrderCommand;
 import com.loopers.application.order.OrderFacade;
+import com.loopers.application.order.OrderInfo;
 import com.loopers.config.cache.ProductCacheRedisConfig;
 import com.loopers.domain.point.Point;
 import com.loopers.infrastructure.point.PointJpaRepository;
@@ -273,6 +274,65 @@ class ProductCacheInvalidationTest {
             assertThat(keyExistsAfterWrite).isTrue();
             assertThat(result.get(0).productId()).isEqualTo(FIRST_PRODUCT_ID);
             assertThat(result.get(0).stockQuantity()).isEqualTo(98);
+        }
+    }
+
+    @DisplayName("과거 주문 유지 — ")
+    @Nested
+    class PastOrdersPreserved {
+        private static final String OTHER_BRAND_CACHE_KEY = "products:v1:brand=8:sort=price_asc:page=0:size=20";
+
+        private OrderInfo confirmOrderOfFirstProduct(Long userId) {
+            Point point = new Point(userId);
+            point.charge(10_000L);
+            pointJpaRepository.save(point);
+            Long orderId = orderFacade.createOrder(userId, List.of(new OrderCommand.Item(FIRST_PRODUCT_ID, 2))).orderId();
+            return orderFacade.confirmOrder(userId, orderId);
+        }
+
+        @DisplayName("주문 확정 뒤 그 상품의 가격을 수정해도, 기존 주문의 단가·결제액은 변경 전 가격 그대로다.")
+        @Test
+        void keepsOrderAmounts_afterPriceChange() {
+            // arrange
+            Long userId = 1L;
+            OrderInfo confirmed = confirmOrderOfFirstProduct(userId);
+            fillCache();
+
+            // act
+            productFacade.updateProduct(FIRST_PRODUCT_ID, "비싸진 상품", 99_999L);
+            OrderInfo reloaded = orderFacade.getOrder(userId, confirmed.orderId());
+            List<ProductInfo> result = queryFixturePage();
+
+            // assert
+            assertThat(reloaded.items().get(0).unitPrice()).isEqualTo(122L);
+            assertThat(reloaded.paidAmount()).isEqualTo(244L);
+            assertThat(result).containsExactlyElementsOf(expectedWithoutFirst());
+        }
+
+        @DisplayName("주문 확정 뒤 그 상품의 브랜드를 일괄 삭제해도, 기존 주문은 조회되고 금액이 그대로이며 다른 브랜드의 목록·캐시 키는 유지된다.")
+        @Test
+        void keepsOrderAndOtherBrandCache_afterBrandDeletion() {
+            // arrange
+            Long userId = 1L;
+            OrderInfo confirmed = confirmOrderOfFirstProduct(userId);
+            fillCache();
+            List<ProductInfo> otherBrandBefore = productFacade.getProducts(8L, "price_asc", 0, 20);
+            assertThat(cacheRedisTemplate.hasKey(OTHER_BRAND_CACHE_KEY)).isTrue();
+
+            // act
+            brandFacade.deleteBrand(7L);
+            boolean otherBrandKeyExists = cacheRedisTemplate.hasKey(OTHER_BRAND_CACHE_KEY);
+            OrderInfo reloaded = orderFacade.getOrder(userId, confirmed.orderId());
+            List<ProductInfo> otherBrandAfter = productFacade.getProducts(8L, "price_asc", 0, 20);
+
+            // assert
+            assertThat(reloaded.status()).isEqualTo(confirmed.status());
+            assertThat(reloaded.items().get(0).productId()).isEqualTo(FIRST_PRODUCT_ID);
+            assertThat(reloaded.items().get(0).unitPrice()).isEqualTo(122L);
+            assertThat(reloaded.paidAmount()).isEqualTo(244L);
+            assertThat(queryFixturePage()).isEmpty();
+            assertThat(otherBrandKeyExists).isTrue();
+            assertThat(otherBrandAfter).hasSize(20).containsExactlyElementsOf(otherBrandBefore);
         }
     }
 }
