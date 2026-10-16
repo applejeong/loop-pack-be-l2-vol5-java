@@ -204,6 +204,9 @@ class ProductFacadeTest {
         @DisplayName("상품 삭제를 서비스에 위임한다.")
         @Test
         void delegatesToProductService() {
+            // arrange
+            given(productService.getActiveProduct(1L)).willReturn(new Product(1L, "루퍼스 티셔츠", new Price(1000L)));
+
             // act
             productFacade.deleteProduct(1L);
 

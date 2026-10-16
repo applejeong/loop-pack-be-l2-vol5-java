@@ -126,6 +126,7 @@ public class ProductFacade {
     public ProductInfo createProduct(Long brandId, String name, long price) {
         Brand brand = requireActiveBrand(brandId);
         Product product = productService.createProduct(brandId, name, new Price(price));
+        productListCache.evictBrandAfterCommit(brandId);
 
         return ProductInfo.of(product, brand.getName(), 0L);
     }
@@ -133,6 +134,7 @@ public class ProductFacade {
     @Transactional
     public ProductInfo updateProduct(Long productId, String name, long price) {
         Product product = productService.updateProduct(productId, name, new Price(price));
+        productListCache.evictBrandAfterCommit(product.getBrandId());
         String brandName = brandRepository.findById(product.getBrandId())
             .map(Brand::getName)
             .orElse(null);
@@ -140,9 +142,14 @@ public class ProductFacade {
         return ProductInfo.of(product, brandName, likeService.countByProductId(product.getId()));
     }
 
+    /**
+     * 무효화할 브랜드를 알기 위해 삭제 전에 상품을 읽는다. 같은 트랜잭션이라 삭제 시 재조회는 영속성 컨텍스트에서 끝난다.
+     */
     @Transactional
     public void deleteProduct(Long productId) {
+        Product product = productService.getActiveProduct(productId);
         productService.deleteProduct(productId);
+        productListCache.evictBrandAfterCommit(product.getBrandId());
     }
 
     /**
