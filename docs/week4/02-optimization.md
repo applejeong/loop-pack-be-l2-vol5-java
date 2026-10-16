@@ -447,6 +447,116 @@ step3 10회: 0.0088, 0.0074, 0.0075, 0.0084, 0.0073, 0.0067, 0.0067, 0.0066, 0.0
 - 폐기분 (`perf/step3/discarded-no-tx/`, env + A 4 + k6 VU1·VU5 4): `77ba157` 적용 전 `b2345e9` 에서 1회 측정한 결과. 브랜드 조회가 트랜잭션 없이 실행돼 요청당 commit 2 / set_option 8 이었고, VU5 mean 은 p50 5.58 ms / 808.42 req/s 였다 (현 step3 7.27 / 613.86). 트랜잭션 문장 4개 감소의 영향 가능성만 적어 두며, 양쪽 모두 1회씩 잰 결과라 차이를 단정하지 않는다. B·C 측정 전에 중단했다. 응답·EXPLAIN·계정 기준 SELECT 3 은 현 step3 과 같았다.
 - SQL 문장 이력을 남기는 performance_schema 설정(`setup_consumers` 의 `events_statements_history_long`)은 MySQL 8 기본값이 NO 이고 컨테이너를 재시작하면 NO 로 돌아간다. 측정 전 `ps-setup.sql` 로 YES 로 켜는데, baseline 측정 이후 MySQL 컨테이너를 재시작하지 않아 step3 에서도 켜기 전부터 YES 였다 (`perf/step3/A-sql.txt` 의 enabled_before = YES). 1회 호출 SQL 캡처(A·B·C-sql.txt)는 이 이력에서 읽는다.
 
+## step4-cache: 상품 목록(가격순) Redis cache-aside (step1·step2·step3 누적)
+
+### 변경
+
+- 커밋: `2b3355d` test(Redis 테스트 컨테이너 주소 주입 시점), `ad47ebb` feat(캐시 전용 Redis 연결), `2719a03` feat(미삭제 상품 재고 일괄 조회), `4a4dc50` feat(cache-aside), `75e429e` feat(commit 후 무효화), `218486a`·`4118b85` test(실패·경쟁·장애 장면, 과거 주문 유지), `ee7c9ba` feat(연결 타임아웃 500ms), `57af583` feat(카운터), `67eef4b` chore(측정 스크립트). 측정은 `67eef4b` 기준.
+- 캐시 조건: `brandId` 있음 + `sort=price_asc` + `size=20` + `page 0~2`. 그 외 요청(B·C 포함)은 기존 DB 경로 그대로.
+- 키 `products:v1:brand={brandId}:sort=price_asc:page={page}:size=20`, TTL 30초(저장 시에만, 읽을 때 연장 없음), 값은 재고를 뺀 6필드(productId, productName, price, brandId, brandName, likeCount) JSON.
+- miss: 기존 DB 경로(SQL 3) → 응답 → 저장. hit: 캐시 목록의 ID 20개로 `deleted_at IS NULL` 인 상품의 재고를 SQL 1개로 읽어 붙임. 재고 조회 건수가 캐시 건수와 다르면(삭제 상품 포함) DB 경로로 돌아가 다시 저장.
+- 무효화: 각 쓰기 트랜잭션 안에서 등록하고 commit 뒤 해당 브랜드 page 0·1·2 키 DEL. 경로 7곳(상품 생성·수정·삭제, 브랜드 이름 수정·일괄 삭제, 좋아요 등록·취소). 재고 설정·주문 확정은 무효화하지 않는다(hit 가 재고를 DB 에서 읽음).
+- Redis 오류: 조회 실패는 로그 후 miss 로 DB, 저장·삭제 실패는 로그만(쓰기 응답은 DB commit 대로). 캐시 전용 연결은 master 단독, 명령 타임아웃 100ms, 연결 타임아웃 500ms, 끊김 시 즉시 실패. 공통 모듈 `RedisConfig` 는 변경 없음.
+- 카운터 `product_list_cache_total{result=hit|miss|hit_check_failed|find_error|save_error|evict_error}` (`/actuator/prometheus`, 8081).
+- 테스트: `./gradlew :apps:commerce-api:check` 323건 통과, 실패·오류·skip 0, Checkstyle 위반 0 (`57af583` 기준).
+
+### 측정 환경 (`perf/step4-cache/env.txt`)
+
+2026-10-17 00:07 ~ 00:11 KST, 앱 코드 HEAD `67eef4b`. step3 앱(PID 91294)을 내리고 `./gradlew :apps:commerce-api:bootRun --console=plain` 으로 재기동(PID 7224, local 프로필). Redis 는 docker `redis-master`(7.0.15, 6379) + `redis-readonly`(6380) 를 기동했고 캐시는 master 만 쓴다. MySQL 컨테이너 재기동 없음. seed → verify 20개 OK → `products:v1:*` 키 0개 확인 → 측정. `SHOW INDEX` 는 step3 와 동일. 측정 시작 전 API 호출 없음.
+
+### 응답 일치
+
+| 요청 | baseline·step3 대비 응답 JSON | 계정 기준 SELECT 수 | 카운터 변화 |
+|---|---|---|---|
+| A miss (키 없음) | 바이트 단위 동일 (2,625 bytes) | 3 | miss +1 |
+| A hit | 바이트 단위 동일 (2,625 bytes) | 1 | hit +1 |
+| B (brandId=7, likes_desc) | 바이트 단위 동일 (2,651 bytes) | 3 | 없음 |
+| C (필터 없음, price_asc) | 바이트 단위 동일 (2,598 bytes) | 3 | 없음 |
+
+### SQL 수와 읽은 행 수 (1회 호출, performance_schema)
+
+ms 는 참고값(1회). `ps-round-capture.sql` 은 이 단계부터 hit 재고 확인 SELECT 를 `stock_check` 로 따로 센다 (목록 SELECT 는 두 번째 열 `brand_id`, 재고 확인은 `quantity` 로 구분). 분류 확인: miss 1회 = product_list 1 / like_count 1 / brand_find 1 / stock_check 0, hit 1회 = 0 / 0 / 0 / 1.
+
+| 요청 | SQL | SQL 수 | rows_examined | ms 참고값(1회) |
+|---|---|---|---|---|
+| A miss | 상품 목록 | 1 | 20 | 0.585 |
+| A miss | 좋아요 집계 (IN 20) | 1 | 437 | 0.460 |
+| A miss | 브랜드 조회 (IN 1) | 1 | 1 | 0.122 |
+| A hit | 재고 확인 (`id IN 20 AND deleted_at IS NULL`) | 1 | 20 | 0.176 |
+| B | 상품 목록 / 좋아요 집계 / 브랜드 조회 | 1 / 1 / 1 | 2,328 / 850 / 1 | 1.689 / 0.206 / 0.085 |
+| C | 상품 목록 / 좋아요 집계 / 브랜드 조회 | 1 / 1 / 1 | 10,020 / 448 / 13 | 3.200 / 0.175 / 0.076 |
+
+요청당 SQL 수는 A miss 3 (step3 과 같음), A hit 1, B 3, C 3. 부수 문장은 A miss 가 commit 3 / set_option 12 / Ping 1, A hit 가 commit 1 / set_option 4 (트랜잭션 3 → 1).
+
+### EXPLAIN (hit 재고 확인 쿼리, `perf/step4-cache/hitcheck-explain.txt`)
+
+| SQL | type / key / rows / Extra | EXPLAIN ANALYZE 주요 노드 (actual rows / loops / actual time ms) |
+|---|---|---|
+| 재고 확인 | range / PRIMARY / 20 / Using where | Index range scan on PRIMARY over 20 id 20 / 1 / 0.0446..0.0623 → Filter 20 / 1 / 0.0493..0.0686 |
+
+A miss 의 SQL 3개는 step3 와 문자열이 같아 실행 계획도 같다.
+
+### A 응답 시간 (k6, 준비 50 + 측정 500 × 3회, 단위 ms) — hit
+
+회차마다 준비 50 직전에 캐시 키 1개를 지워 준비의 첫 요청이 다시 채우게 했다 (TTL 이 회차마다 새로 시작). 측정 500회 구간 카운터는 3회차 모두 hit 500 / miss 0 / 그 외 0.
+
+VU 1명 회차별 (`perf/step4-cache/k6-A-hit-vu1-summary.tsv`)
+
+| 회차 | avg | p50 | p90 | p95 | max | req/s | 실패 | stock_check | 그 외 SELECT | 요청당 SQL |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 3.01 | 2.70 | 3.95 | 4.63 | 22.12 | 324.57 | 0 | 500 | 0 | 1.000 |
+| 2 | 2.12 | 1.94 | 2.63 | 3.02 | 7.81 | 461.19 | 0 | 500 | 0 | 1.000 |
+| 3 | 1.95 | 1.82 | 2.31 | 2.58 | 8.31 | 500.22 | 0 | 500 | 0 | 1.000 |
+
+회차 간 편차 (범위 ÷ 평균): avg 44.9%, p50 40.9%, p95 60.1%, req/s 41.0%. 회차당 commit 500 / set_option 2,000 (요청당 1 / 4).
+
+VU 5명 회차별 (`perf/step4-cache/k6-A-hit-vu5-summary.tsv`)
+
+| 회차 | avg | p50 | p90 | p95 | max | req/s | 실패 | stock_check (digest) | 그 외 SELECT | 요청당 SQL (digest) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 3.13 | 2.90 | 4.08 | 4.55 | 5.96 | 1558.14 | 0 | 486 | 14 | 0.972 |
+| 2 | 3.11 | 2.83 | 3.76 | 4.74 | 9.23 | 1570.14 | 0 | 485 | 15 | 0.970 |
+| 3 | 3.02 | 2.88 | 3.65 | 4.03 | 6.08 | 1605.38 | 0 | 484 | 16 | 0.968 |
+
+회차 간 편차: avg 3.6%, p50 2.4%, p95 16.0%, req/s 3.0%. 계정 기준 SELECT 는 3회차 모두 500 (요청당 1.000). digest 의 stock_check 가 484~486 으로 적게 잡힌 것은 step2·step3 VU5 와 같은 누락 양상이다 (특이사항).
+
+step3 (캐시 전) · step4 hit (summary.tsv mean 행)
+
+| 동시 요청 | 지표 | baseline | step3 | step4 hit | hit ÷ step3 | hit ÷ baseline |
+|---|---|---|---|---|---|---|
+| VU 1 | avg | 22.06 | 4.90 | 2.36 | 0.48 | 0.11 |
+| VU 1 | p50 | 22.01 | 4.73 | 2.15 | 0.45 | 0.10 |
+| VU 1 | p95 | 23.31 | 5.95 | 3.41 | 0.57 | 0.15 |
+| VU 1 | max | 31.36 | 13.18 | 12.75 | 0.97 | 0.41 |
+| VU 1 | req/s | 44.97 | 202.43 | 428.66 | 2.12 | 9.53 |
+| VU 5 | avg | 25.45 | 8.04 | 3.09 | 0.38 | 0.12 |
+| VU 5 | p50 | 24.93 | 7.27 | 2.87 | 0.39 | 0.12 |
+| VU 5 | p95 | 30.24 | 12.43 | 4.44 | 0.36 | 0.15 |
+| VU 5 | max | 48.44 | 29.69 | 7.09 | 0.24 | 0.15 |
+| VU 5 | req/s | 195.16 | 613.86 | 1577.89 | 2.57 | 8.09 |
+| 공통 | 요청당 SQL (계정 기준) | 3.000 | 3.000 | 1.000 | 0.33 | 0.33 |
+
+miss 는 k6 로 재지 않았다 (요청 사이에 키를 지울 수 없음). miss 응답 시간은 아래 단발 반복만 있다.
+
+### A 단발 100회 (curl, 단위 초, 참고값)
+
+`single-calls.sh`. miss 는 매 호출 직전 키 DEL 후 호출, hit 는 준비 호출 1회(결과 버림) 뒤 호출. time_total 은 curl 프로세스 비용이 섞인 참고값이고, miss 쪽은 DEL 명령 시간이 호출 사이에 끼지만 time_total 에는 들어가지 않는다.
+
+| 모드 | avg | p50 | p90 | min | max | 카운터 (100회) | 계정 기준 SELECT | digest |
+|---|---|---|---|---|---|---|---|---|
+| miss | 0.0093 | 0.0082 | 0.0097 | 0.0076 | 0.0525 | miss +100 | 300 | 목록 100 / 좋아요 100 / 브랜드 100 / stock_check 0 |
+| hit | 0.0033 | 0.0032 | 0.0036 | 0.0029 | 0.0042 | hit +100 | 100 | 0 / 0 / 0 / 100 |
+
+1회 캡처의 time_total 은 miss 0.181초(재기동 후 첫 요청), hit 0.067초 (참고값).
+
+### 특이사항
+
+- VU1 1회차가 2·3회차보다 느린 경향이 이번에도 있다 (p50 2.70 → 1.94 → 1.82, req/s 325 → 461 → 500). mean 행은 1회차를 포함한 평균이다. 원인은 step3 와 같이 확인하지 않았다.
+- VU5 digest stock_check 484~486 (계정 기준 500). 그 외 SELECT 14~16 은 digest 표에 대응 행이 없는 누락분으로, step2·step3 VU5 의 양상과 같다. 재측정하지 않았다.
+- A miss 1회 캡처의 문장 목록에 `SQL_TEXT: NULL` 1행이 있었다 (계정 기준 SELECT 3 에는 영향 없음). 원인은 확인하지 않았다.
+- 측정 중 생긴 `products:v1:*` 키는 측정 뒤 그 키만 DEL 로 지웠다 (FLUSHALL 안 씀). 누적 카운터 최종값 hit 3,383 / miss 120 (k6 준비·단발·1회 캡처 포함).
+- 측정하지 않은 것: miss 의 k6 동시 요청 측정, page 1·2 와 다른 브랜드의 hit, TTL 만료 시점이 측정 구간에 걸리는 경우(회차마다 키를 지워 피함).
+
 ## 측정하지 않은 범위
 
 - 브랜드 필터 없는 likes_desc(B', `GET /api/v1/products?sort=likes_desc&page=0&size=20`)는 정식 측정 대상에 넣지 않았고 step3 이후 1회만 확인했다 (참고값(1회), 근거 `perf/step3/Bprime-sql.txt`·`Bprime-explain.txt`). 계정 기준 SELECT 3, 상품 목록 쿼리 rows_examined 233,057 (B 는 2,328), 정렬 서브쿼리 loops 10,000 (B 는 100), Sort 노드 30.3 ms (B 는 0.55 ms), 1회 호출 0.060초.

@@ -400,7 +400,7 @@ AI와 설계 다듬기
 - 좋아요 집계 비용: likes 에 product_id 선두 인덱스 없음 (uk_likes_user_product 는 user_id 선두)
 - likes_desc 는 별도 기록: seed 후 1회 호출(브랜드 미지정, size 3) 117초. 정식 측정 아님.
   정렬용 상관 서브쿼리가 상품 행마다 likes 를 세는 구조
-- 측정 도구·표본 수: 미정
+- 측정 도구·표본 수: k6 `shared-iterations`, 준비 50회(결과 버림) + 측정 500회 × 3회, VU 1·5. 단발은 curl (B 10회, 캐시 hit/miss 100회). 기록은 `docs/week4/02-optimization.md`.
 
 ### 7-3. 측정 데이터
 - apps/commerce-api/src/test/resources/sql/product-perf-seed.sql, product-perf-verify.sql (로컬 docker MySQL 수동 실행과 테스트에서 재사용, 앱 자동 실행 경로 아님)
@@ -408,19 +408,27 @@ AI와 설계 다듬기
 - 가격 동점의 id DESC 는 ProductRepositoryTest.appliesSecondarySort_whenPrimarySortIsTied 로 확인 (price_asc 만 커버)
 
 ### 7-4. 캐시 범위
-- 미정
+- 경로: GET /api/v1/products 중 brandId 있음 + sort=price_asc + size 20 + page 0~2 만 Redis cache-aside. 그 외 요청은 DB 경로.
+- 키 `products:v1:brand={brandId}:sort=price_asc:page={page}:size=20`, TTL 30초(저장 시에만).
+- 재사용 필드: productId, productName, price, brandId, brandName, likeCount. 제외: stockQuantity (hit 때 DB 에서 미삭제 상품의 재고를 SQL 1개로 읽어 붙임). 사용자별 필드는 응답에 없음 (7-1).
+- hit 확인: 캐시 ID 20개 중 미삭제 상품 수가 캐시 건수와 다르면 DB 경로로 돌아가 다시 저장 → 삭제 상품은 캐시가 남아 있어도 노출되지 않음.
 
 ### 7-5. 변경 책임 — 응답을 바꾸는 쓰기 경로
-무효화 방식은 미정. 아래 경로가 7-1 응답 필드를 바꾼다.
+각 쓰기 트랜잭션 안에서 등록하고 commit 뒤 해당 브랜드의 page 0~2 키를 삭제한다 (rollback 이면 삭제하지 않음). 트랜잭션 경계는 그대로이며, 좋아요는 Facade 에 트랜잭션이 없어 LikeService 가 경계다.
 
-| 쓰기 경로 | 진입점 | 바뀌는 응답 (추측) |
-|---|---|---|
-| 상품 가격·이름 수정 | PUT /api-admin/v1/products/{productId} | price, productName, price_asc 순서 |
-| 상품 생성·삭제 | POST /api-admin/v1/products, DELETE /api-admin/v1/products/{productId} | 목록 포함 여부, latest 순서 |
-| 브랜드 이름 변경·삭제 | PUT /api-admin/v1/brands/{brandId}, DELETE /api-admin/v1/brands/{brandId} | brandName, 삭제 시 연결 상품 목록 제외 |
-| 좋아요 등록·취소 (취소는 물리 삭제) | POST /api/v1/products/{productId}/likes, DELETE /api/v1/products/{productId}/likes | likeCount, likes_desc 순서 |
-| 재고 변경 (주문 확정, 관리자 재고 설정) | POST /api/v1/orders/{orderId}/confirm, PUT /api-admin/v1/products/{productId}/stock | stockQuantity |
+| 쓰기 경로 | 진입점 | 바뀌는 응답 | 캐시 |
+|---|---|---|---|
+| 상품 가격·이름 수정 | PUT /api-admin/v1/products/{productId} | price, productName, price_asc 순서 | commit 후 무효화 (ProductFacade) |
+| 상품 생성·삭제 | POST /api-admin/v1/products, DELETE /api-admin/v1/products/{productId} | 목록 포함 여부 | commit 후 무효화 (ProductFacade, 삭제는 삭제 전에 읽어 브랜드 확인) |
+| 브랜드 이름 변경·삭제 | PUT /api-admin/v1/brands/{brandId}, DELETE /api-admin/v1/brands/{brandId} | brandName, 삭제 시 연결 상품 제외 | commit 후 무효화 (BrandFacade) |
+| 좋아요 등록·취소 (취소는 물리 삭제) | POST·DELETE /api/v1/products/{productId}/likes | likeCount | commit 후 무효화 (LikeService, 상품 행이 없으면 건너뜀) |
+| 재고 변경 (주문 확정, 관리자 재고 설정) | POST /api/v1/orders/{orderId}/confirm, PUT /api-admin/v1/products/{productId}/stock | stockQuantity | 무효화 안 함. hit 가 재고를 DB 에서 읽음 |
+| 주문 생성 | POST /api/v1/orders | 없음 (재고 미차감) | 해당 없음 |
 
 ### 7-6. 장애 계약
-- 미정
+- 연결: 캐시 전용 Redis 연결(master 단독), 명령 타임아웃 100ms, 연결 타임아웃 500ms, 끊기면 즉시 실패. 공통 모듈의 기본 연결(replica 우선, 60초)은 캐시에 쓰지 않는다.
+- Redis 오류: 조회 실패·역직렬화 실패는 miss 로 DB 우회해 정상 응답. 저장·삭제 실패는 로그와 카운터만 남기고, 쓰기 응답은 DB commit 대로 성공. DB 오류는 기존 오류 계약 그대로(빈 목록으로 감추지 않음).
+- 표시 신선도: 정상 변경 commit 직후의 순차 조회는 새 결과. 무효화 실패·늦은 채움에서는 가격·상품명·브랜드명·좋아요 수·가격순 순서·새 상품 노출이 TTL 만료 후 다음 miss 까지 옛 값일 수 있다 (시간 상한은 주장하지 않음). 항상 보호: 삭제 상품 비노출(hit 확인), 재고(hit 시 DB), 주문 금액·재고 판단(DB).
+- 복구: TTL 만료 뒤 첫 miss 가 DB 로 다시 채운다. Redis 재시작 뒤 자동 재연결(측정 0~105ms). 같은 컨테이너를 재시작하면 옛 키가 남은 TTL 과 함께 되살아날 수 있다(RDB/AOF) — 위 보호 항목은 그대로 유지된다.
+- 관찰: 카운터 product_list_cache_total{result=hit|miss|hit_check_failed|find_error|save_error|evict_error}. 측정값(ProductCacheRedisOutageTest): 중단 중 조회 1회 25~30ms, 응답 없음(pause) 중 229~240ms, 재시작 뒤 재연결 0~105ms.
        - 경쟁 테스트는 결과 불변식만 검증하며, 특정 교차 순서를 강제하지는 않는다.
