@@ -6,7 +6,7 @@
 - step2 VU5·B·C 는 스크립트 커밋 `e9b9f19` 이후 측정, 앱 코드는 `0f4a094` (스크립트 변경은 결과 파일 형식만).
 - 요청당 SQL 수는 계정(application) 기준 SELECT 합계 ÷ 요청 수로 적는다. digest 기준 3종 합계는 보조 값이다.
 - A·B·C 1회 호출의 ms 는 표본 1개라 "참고값(1회)" 이다. 단계 간 비교는 rows_examined·실행 계획·SQL 수 중심으로 적는다.
-- C EXPLAIN 은 step2 에서만 기록했고 전후 비교가 아니다.
+- C EXPLAIN 은 step2·step3 에서만 기록했다 (baseline·step1 없음). step2 → step3 비교만 가능하다.
 
 ## step1: likes(product_id) 인덱스
 
@@ -267,6 +267,181 @@ step2 10회: 0.0092, 0.0085, 0.0074, 0.0078, 0.0077, 0.0071, 0.0074, 0.0074, 0.0
 - 1회 호출 소요 시간은 재기동 후 첫 요청이거나 표본 1개라 참고값이다 (A 0.287초, B 0.075초, C 0.045초).
 - VU5 2·3회차에서 digest 요약 표가 10·6건 누락. 계정 기준 SELECT 는 1,500 이고, 3회차는 문장 이력으로 1,500건 확인.
 - `events_statements_history_long` consumer 는 baseline 측정 이후 컨테이너를 재시작하지 않아 YES 로 유지된 상태였다.
+
+## step3: 브랜드 IN 조회 (step1·step2 누적)
+
+### 변경
+
+- 커밋 `b2345e9` feat: 상품 목록 브랜드 조회를 IN 한 번으로 변경 (step3), `77ba157` fix: findAllByIdIn에 readOnly 트랜잭션 적용 (step2와 트랜잭션 조건 일치). 측정은 `77ba157` 기준.
+- `ProductFacade.findBrandNames` (고객·관리자 목록 공용): 브랜드 id 마다 `brandRepository.findById` 를 호출하던 것을 `BrandRepository.findAllByIdIn(brandIds)` 한 번으로 교체. `BrandRepository`(domain)·`BrandJpaRepository`·`BrandRepositoryImpl`(infrastructure) 에 `findAllByIdIn` 추가. step1·step2 인덱스와 그 밖의 코드는 그대로.
+- 계약 유지: 삭제된 브랜드도 이름을 그대로 노출하고, 브랜드 행이 없으면 브랜드명 null. 그래서 IN 쿼리에 deleted_at 조건을 넣지 않았다. 상품이 0개면 findBrandNames 전에 반환하므로 빈 IN 쿼리는 보내지 않는다.
+- `BrandJpaRepository.findAllByIdIn` 에 `@Transactional(readOnly = true)` (77ba157). 인터페이스에 선언한 쿼리 메서드에는 `SimpleJpaRepository` 의 클래스 `@Transactional(readOnly = true)` 가 적용되지 않는다 (spring-data-commons 3.4.4 `TransactionalRepositoryProxyPostProcessor.computeTransactionAttribute`: 대상 클래스에 구현 메서드가 없으면 null). 붙이지 않으면 브랜드 조회가 autocommit 으로 실행돼 요청당 commit 3 → 2, set_option 12 → 8 로 step2 와 부수 문장 조건이 달라진다 (특이사항의 폐기분 참고).
+- 테스트: `ProductFacadeTest` 의 `findById(1L)` 스텁을 `findAllByIdIn(eq(Set.of(1L)))` 로 교체 (`ReflectionTestUtils.setField` 로 Brand id 1L 설정). `AdminCrudV1ApiE2ETest.GetListsAsAdmin` 에 "브랜드 삭제 후 관리자 상품 목록에서 브랜드명이 그대로 나온다" 추가 (변경 전 코드도 만족하는 회귀 방지 테스트, IN 쿼리에 deleted_at 조건이 들어가면 실패). 삭제 브랜드명 노출·브랜드 없음 → null 을 직접 확인하는 단위 테스트는 추가하지 않았다.
+- 테스트 명령: `./gradlew :apps:commerce-api:test --tests '*Brand*' --tests '*Product*' --tests '*Like*' --tests '*ArchitectureTest'` BUILD SUCCESSFUL (77ba157 기준 실행, 165건 통과, 실패·오류·skip 0).
+
+| 테스트 클래스 | 실행 | 실패 | 오류 | skip |
+|---|---|---|---|---|
+| ProductFacadeTest | 11 | 0 | 0 | 0 |
+| ProductServiceTest | 22 | 0 | 0 | 0 |
+| ProductTest | 12 | 0 | 0 | 0 |
+| ProductSortTypeTest | 3 | 0 | 0 | 0 |
+| ProductRepositoryTest | 12 | 0 | 0 | 0 |
+| ProductV1ApiE2ETest | 9 | 0 | 0 | 0 |
+| AdminCrudV1ApiE2ETest (전체) | 19 | 0 | 0 | 0 |
+| BrandFacadeTest | 10 | 0 | 0 | 0 |
+| BrandFacadeIntegrationTest | 1 | 0 | 0 | 0 |
+| BrandTest | 10 | 0 | 0 | 0 |
+| BrandV1ApiE2ETest | 3 | 0 | 0 | 0 |
+| AdminBrandV1ApiE2ETest | 3 | 0 | 0 | 0 |
+| LikeFacadeTest | 9 | 0 | 0 | 0 |
+| LikeServiceTest | 7 | 0 | 0 | 0 |
+| LikeTest | 7 | 0 | 0 | 0 |
+| LikeV1ApiE2ETest | 10 | 0 | 0 | 0 |
+| ArchitectureTest | 3 | 0 | 0 | 0 |
+| Order 계열 6 클래스 (메서드명에 Product/Like 가 들어가 패턴에 걸림) | 14 | 0 | 0 | 0 |
+| 합계 | 165 | 0 | 0 | 0 |
+
+브랜드 조회 SQL 문장 변경 (캡처 원문, 상품 목록·좋아요 집계 SQL 은 A·B·C 모두 step2 와 문자열 동일)
+
+| 요청 | step2 | step3 |
+|---|---|---|
+| A·B | `select b1_0.id,b1_0.created_at,b1_0.deleted_at,b1_0.name,b1_0.updated_at from brands b1_0 where b1_0.id=7` | `select b1_0.id,b1_0.created_at,b1_0.deleted_at,b1_0.name,b1_0.updated_at from brands b1_0 where b1_0.id in (7)` |
+| C | `select b1_0.id,b1_0.created_at,b1_0.deleted_at,b1_0.name,b1_0.updated_at from brands b1_0 where b1_0.id=2` 부터 `id=14` 까지 13문장 | `select b1_0.id,b1_0.created_at,b1_0.deleted_at,b1_0.name,b1_0.updated_at from brands b1_0 where b1_0.id in (2,3,4,5,6,7,8,9,10,11,12,13,14)` 1문장 |
+
+### 측정 환경 (`perf/step3/env.txt`)
+
+2026-10-16 16:06 ~ 16:12 KST, 앱 코드 HEAD `77ba157`. 앱은 16:06 KST 기동(PID 91294) 후 재기동 없음, MySQL 컨테이너도 재기동 없음. 옵션 없이 local 재기동 → seed → verify 20개 OK. `SHOW INDEX` 로 step1 `idx_likes_product_id`, step2 `idx_products_brand_deleted_amount_id (brand_id, deleted_at, amount, id DESC)` 가 그대로 있고 brands 는 PRIMARY 만인 것을 확인. 그 외 환경은 baseline 과 동일. 측정 시작 전 API 호출 없음.
+
+### 응답 일치
+
+| 요청 | baseline 대비 응답 JSON | 캡처 SQL 문자열 | 계정 기준 SELECT 수 |
+|---|---|---|---|
+| A (brandId=7, price_asc) | 바이트 단위 동일 (2,625 bytes) | 상품 목록·좋아요 집계 2개 동일, 브랜드 `id=7` → `id in (7)` | 3 (step2 와 동일) |
+| B (brandId=7, likes_desc) | 바이트 단위 동일 (2,651 bytes) | 2개 동일, 브랜드 `id=7` → `id in (7)` | 3 |
+| C (필터 없음, price_asc) | 바이트 단위 동일 (2,598 bytes) | 2개 동일, 브랜드 13문장 → IN 1문장 | 3 (step2 는 15) |
+
+### SQL 수와 읽은 행 수 (1회 호출, performance_schema)
+
+ms 는 참고값(1회).
+
+| 요청 | SQL | SQL 수 (baseline / step1 / step2 / step3) | rows_examined step2 | step3 | ms 참고값(1회) step2 / step3 |
+|---|---|---|---|---|---|
+| A | 상품 목록 | 1 / 1 / 1 / 1 | 20 | 20 | 0.905 / 1.063 |
+| A | 좋아요 집계 (IN 20) | 1 / 1 / 1 / 1 | 437 | 437 | 0.739 / 1.036 |
+| A | 브랜드 조회 | 1 / 1 / 1 / 1 | 1 | 1 | 0.191 / 0.421 |
+| B | 상품 목록 (likes_desc 정렬 서브쿼리) | 1 / 1 / 1 / 1 | 2,328 | 2,328 | 2.443 / 2.403 |
+| B | 좋아요 집계 (IN 20) | 1 / 1 / 1 / 1 | 850 | 850 | 0.260 / 0.349 |
+| B | 브랜드 조회 | 1 / 1 / 1 / 1 | 1 | 1 | 0.143 / 0.144 |
+| C | 상품 목록 (필터 없음) | 1 / 1 / 1 / 1 | 10,020 | 10,020 | 3.512 / 2.630 |
+| C | 좋아요 집계 (IN 20) | 1 / 1 / 1 / 1 | 448 | 448 | 0.428 / 0.369 |
+| C | 브랜드 조회 | 13 / 13 / 13 / **1** | 각 1 (합 13) | 13 | 합 0.594 / 0.363 |
+
+요청당 SQL 수는 A 3, B 3 으로 네 단계 모두 같고, C 는 15 → 3. baseline·step1·step2 의 rows_examined 는 step2 절 표와 같다. 부수 문장은 A·B 가 commit 3 / set_option 12 / Ping 1 로 step2 와 같고, C 는 commit 15 → 3, set_option 60 → 12. `no_index_used` 는 변화 없음 (C 상품 목록만 1).
+
+### EXPLAIN 변화 (type / key / rows / Extra)
+
+A·B 의 SQL 3개는 select_type·type·possible_keys·key·key_len·ref·rows·Extra 가 step2 와 모두 같다. 브랜드 조회만 적는다.
+
+| 요청 | SQL | step2 | step3 |
+|---|---|---|---|
+| A | 브랜드 조회 | const / PRIMARY / 1 / NULL | const / PRIMARY / 1 / NULL (`id in (7)` 은 const 로 처리) |
+| B | 브랜드 조회 | const / PRIMARY / 1 / NULL | const / PRIMARY / 1 / NULL |
+| C | 브랜드 조회 | const / PRIMARY / 1 / NULL × 13 (대표 id=2 만 기록) | range / PRIMARY / 13 / Using where |
+
+C EXPLAIN step2 → step3 (`perf/step3/C-explain.txt`)
+
+| SQL | step2 | step3 |
+|---|---|---|
+| 상품 목록 (필터 없음) | ALL / NULL / 9700 / Using where; Using filesort | 동일 |
+| 좋아요 집계 | range / idx_likes_product_id / 449 / Using where; Using index | 동일 |
+| 브랜드 조회 | const / PRIMARY / 1 / NULL (id=2, 13문장 중 1개) | range / PRIMARY / 13 / Using where (IN 13개, 1문장) |
+
+C 브랜드 조회 step2 13문장 합 ↔ step3 1문장 (1회 캡처, performance_schema)
+
+| | step2 `id=?` × 13 | step3 `id in (13개)` × 1 |
+|---|---|---|
+| 실행 횟수 | 13 | 1 |
+| ms 합 (참고값) | 0.594 (0.027 ~ 0.160) | 0.363 |
+| rows_examined 합 | 13 | 13 |
+| rows_sent 합 | 13 | 13 |
+| EXPLAIN ANALYZE | Rows fetched before execution 1 / 1 / 0..0.000042 (id=2) | Index range scan on PRIMARY 13 / 1 / 0.0126..0.0171 → Filter 13 / 1 / 0.013..0.0183 |
+
+EXPLAIN ANALYZE 주요 노드 (actual rows / loops / actual time ms), step2 → step3
+
+| 요청 | 노드 | step2 | step3 |
+|---|---|---|---|
+| A | 상품 목록: products 접근 | Index lookup on idx_products_brand_deleted_amount_id 20 / 1 / 0.026..0.0385 | 동일 노드 20 / 1 / 0.043..0.0548 |
+| A | 상품 목록: Limit | 20 / 1 / 0.0305..0.0438 | 20 / 1 / 0.0493..0.0619 |
+| A | 좋아요 집계: likes 접근 | Covering index range scan 437 / 1 / 0.00767..0.0567 | 437 / 1 / 0.00683..0.0505 |
+| A | 좋아요 집계: 집계 | Group aggregate 18 / 1 / 0.0161..0.0908 | 18 / 1 / 0.0145..0.0825 |
+| A | 브랜드 조회 | Rows fetched before execution 1 / 1 / 0.000042..0.000084 | 1 / 1 / 0.000084..0.000084 |
+| B | 상품 목록: products 접근 | Index lookup on idx_products_brand_deleted_amount_id 100 / 1 / 0.0236..0.108 | 100 / 1 / 0.0312..0.121 |
+| B | 상품 목록: Sort (select #2) DESC, id DESC (limit 20) | 20 / 1 / 0.525..0.526 | 20 / 1 / 0.55..0.551 |
+| B | 정렬 서브쿼리: likes 접근 | Covering index lookup 22.1 / 100 / 0.00207..0.0032 | 22.1 / 100 / 0.00217..0.0033 |
+| B | 정렬 서브쿼리: Aggregate count | 1 / 100 / 0.00379..0.00381 | 1 / 100 / 0.00391..0.00393 |
+| B | 좋아요 집계: likes 접근 | Covering index range scan 850 / 1 / 0.00717..0.0963 | 850 / 1 / 0.00813..0.0961 |
+| B | 좋아요 집계: 집계 | Group aggregate 20 / 1 / 0.0179..0.158 | 20 / 1 / 0.0194..0.158 |
+| C | 상품 목록: products 접근 → Sort amount, id DESC (limit 20) | Table scan 10000 / 1 / 0.0621..1.63 → Sort 20 / 1 / 2.69 | Table scan 10000 / 1 / 0.0428..1.56 → Sort 20 / 1 / 2.57 |
+| C | 좋아요 집계: likes 접근 → 집계 | Covering index range scan 448 / 1 / 0.0157..0.0792 → Group aggregate 19 / 1 / 0.0239..0.12 | 448 / 1 / 0.00838..0.0595 → 19 / 1 / 0.0147..0.0977 |
+
+### A 응답 시간 (k6, 준비 50 + 측정 500 × 3회, 단위 ms)
+
+VU 1명 회차별 (`perf/step3/k6-A-vu1-summary.tsv`)
+
+| 회차 | avg | p50 | p90 | p95 | max | req/s | 실패 | 계정 기준 SELECT | digest 3종 합계 | 그 외 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 5.38 | 5.25 | 6.12 | 6.52 | 10.74 | 183.29 | 0 | 1500 | 1500 | 0 |
+| 2 | 4.87 | 4.64 | 5.62 | 6.08 | 16.59 | 202.31 | 0 | 1500 | 1500 | 0 |
+| 3 | 4.46 | 4.30 | 4.93 | 5.24 | 12.20 | 221.69 | 0 | 1500 | 1500 | 0 |
+
+회차 간 편차 (범위 ÷ 평균): avg 18.8%, p50 20.1%, p90 21.4%, p95 21.5%, max 44.4%, req/s 19.0%. 회차당 commit 1,500 / set_option 6,000 (요청당 3 / 12) 으로 step2 와 같다.
+
+VU 5명 회차별 (`perf/step3/k6-A-vu5-summary.tsv`)
+
+| 회차 | avg | p50 | p90 | p95 | max | req/s | 실패 | 계정 기준 SELECT | digest 3종 합계 | 그 외 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 7.68 | 6.94 | 8.97 | 11.30 | 30.89 | 642.01 | 0 | 1500 | 1495 | 5 |
+| 2 | 7.94 | 7.11 | 9.99 | 13.08 | 21.52 | 620.15 | 0 | 1500 | 1491 | 9 |
+| 3 | 8.50 | 7.76 | 10.03 | 12.90 | 36.67 | 579.43 | 0 | 1502 | 1495 | 7 |
+
+회차 간 편차 (범위 ÷ 평균): avg 10.2%, p50 11.3%, p90 11.0%, p95 14.3%, max 51.0%, req/s 10.2%. 요청당 SQL 수는 계정 기준 1,500 ÷ 500 = 3.000 (3회차는 1,502, 특이사항 참고. summary.tsv 의 digest 기준 sql_per_req 는 2.990 / 2.982 / 2.990).
+
+baseline · step1 · step2 · step3 (summary.tsv mean 행)
+
+| 동시 요청 | 지표 | baseline | step1 | step2 | step3 | step3 ÷ baseline | step3 ÷ step2 |
+|---|---|---|---|---|---|---|---|
+| VU 1 | avg | 22.06 | 6.81 | 4.56 | 4.90 | 0.22 | 1.07 |
+| VU 1 | p50 | 22.01 | 6.51 | 4.25 | 4.73 | 0.21 | 1.11 |
+| VU 1 | p95 | 23.31 | 8.26 | 6.21 | 5.95 | 0.26 | 0.96 |
+| VU 1 | max | 31.36 | 18.90 | 15.24 | 13.18 | 0.42 | 0.86 |
+| VU 1 | req/s | 44.97 | 145.27 | 218.78 | 202.43 | 4.50 | 0.93 |
+| VU 5 | avg | 25.45 | 8.52 | 7.07 | 8.04 | 0.32 | 1.14 |
+| VU 5 | p50 | 24.93 | 8.17 | 6.58 | 7.27 | 0.29 | 1.10 |
+| VU 5 | p95 | 30.24 | 10.54 | 9.65 | 12.43 | 0.41 | 1.29 |
+| VU 5 | max | 48.44 | 18.08 | 20.78 | 29.69 | 0.61 | 1.43 |
+| VU 5 | req/s | 195.16 | 581.48 | 699.84 | 613.86 | 3.15 | 0.88 |
+| 공통 | 요청당 SQL (계정 기준) | 3.000 | 3.000 | 3.000 | 3.000 | 1.00 | 1.00 |
+
+A 는 step3 전후로 브랜드 조회 수(1)·트랜잭션 수(3)·SQL 수(3)가 같다. VU1(p50 4.25 → 4.73)·VU5(p50 6.58 → 7.27) 의 step2 ↔ step3 차이는 측정 편차로 보고 개선·악화로 적지 않는다.
+
+### B 응답 시간 (10회 순차 curl, 단위 초)
+
+step3 10회: 0.0088, 0.0074, 0.0075, 0.0084, 0.0073, 0.0067, 0.0067, 0.0066, 0.0063, 0.0064 (모두 200). 10회 구간 계정 기준 SELECT 30, digest 3종 30 (10/10/10), 그 외 0. commit 30 / set_option 120.
+
+| 지표 | baseline | step1 | step2 | step3 |
+|---|---|---|---|---|
+| avg | 1.186 | 0.0108 | 0.0076 | 0.0072 |
+| p50 | 1.175 | 0.0091 | 0.0074 | 0.0070 |
+| min | 1.128 | 0.0081 | 0.0068 | 0.0063 |
+| max | 1.310 | 0.0218 | 0.0092 | 0.0088 |
+
+### 특이사항
+
+- 1회 호출 소요 시간은 재기동 후 첫 요청이거나 표본 1개라 참고값이다 (A 0.294초, B 0.083초, C 0.030초).
+- VU5 3회차 계정 기준 SELECT 1,502건 (기대 1,500). 초과 2건 중 1건은 digest 표의 `SELECT @@SESSION.transaction_read_only` 1건 (같은 회차 set_option 6,002 의 초과분 `SET character_set_results` 1건과 함께 나타나는 커넥션 초기화 문장) 으로 확인, 1건은 digest 표에 대응 행이 없어 미확인. 재측정하지 않았다. digest 3종 합계는 1,495 / 1,491 / 1,495 로 step2 VU5 와 같은 누락 양상.
+- VU1 1회차 com/Ping 1, VU5 1회차 com/Ping 5 (계정 카운터 표에만 나타나고 SQL 수에 넣지 않음).
+- 폐기분 (`perf/step3/discarded-no-tx/`, env + A 4 + k6 VU1·VU5 4): `77ba157` 적용 전 `b2345e9` 에서 1회 측정한 결과. 브랜드 조회가 트랜잭션 없이 실행돼 요청당 commit 2 / set_option 8 이었고, VU5 mean 은 p50 5.58 ms / 808.42 req/s 였다 (현 step3 7.27 / 613.86). 트랜잭션 문장 4개 감소의 영향 가능성만 적어 두며, 양쪽 모두 1회씩 잰 결과라 차이를 단정하지 않는다. B·C 측정 전에 중단했다. 응답·EXPLAIN·계정 기준 SELECT 3 은 현 step3 과 같았다.
+- SQL 문장 이력을 남기는 performance_schema 설정(`setup_consumers` 의 `events_statements_history_long`)은 MySQL 8 기본값이 NO 이고 컨테이너를 재시작하면 NO 로 돌아간다. 측정 전 `ps-setup.sql` 로 YES 로 켜는데, baseline 측정 이후 MySQL 컨테이너를 재시작하지 않아 step3 에서도 켜기 전부터 YES 였다 (`perf/step3/A-sql.txt` 의 enabled_before = YES). 1회 호출 SQL 캡처(A·B·C-sql.txt)는 이 이력에서 읽는다.
 
 ## 측정하지 않은 범위
 
