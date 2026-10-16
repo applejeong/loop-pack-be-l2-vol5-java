@@ -9,10 +9,12 @@ import com.loopers.domain.product.ProductListCache;
 import com.loopers.domain.product.ProductService;
 import com.loopers.support.error.CoreException;
 import com.loopers.support.error.ErrorType;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Answers;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -48,6 +50,10 @@ class ProductFacadeTest {
 
     @Mock
     private ProductListCache productListCache;
+
+    // counter(...).increment() 가 null 에 걸리지 않도록 깊은 stub 으로 둔다
+    @Mock(answer = Answers.RETURNS_DEEP_STUBS)
+    private MeterRegistry meterRegistry;
 
     @InjectMocks
     private ProductFacade productFacade;

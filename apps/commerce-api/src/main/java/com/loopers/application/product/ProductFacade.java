@@ -11,6 +11,7 @@ import com.loopers.domain.product.ProductService;
 import com.loopers.domain.product.ProductSortType;
 import com.loopers.support.error.CoreException;
 import com.loopers.support.error.ErrorType;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
@@ -27,29 +28,44 @@ public class ProductFacade {
 
     private static final int CACHED_PAGE_SIZE = 20;
     private static final int CACHED_LAST_PAGE = 2;
+    private static final String CACHE_METRIC = "product.list.cache";
 
     private final ProductService productService;
     private final BrandRepository brandRepository;
     private final LikeService likeService;
     private final ProductListCache productListCache;
+    private final MeterRegistry meterRegistry;
 
     /**
      * 브랜드 필터 + 가격순 + 20개 + 0~2페이지 요청만 캐시를 거친다. 그 외는 DB 경로 그대로다.
      * hit 는 캐시 목록에 현재 재고를 붙여 응답하고, 캐시 안에 삭제된 상품이 섞여 있으면 DB 경로로 돌아가 다시 저장한다.
+     * 캐시 조건에 맞는 요청 1회마다 카운터 hit / miss / hit_check_failed 중 하나만 1 늘린다.
+     * 캐시 조회 오류로 빈 값이 돌아온 경우도 miss 로 센다 (miss = 캐시를 못 써서 DB 로 간 횟수).
      */
     public List<ProductInfo> getProducts(Long brandId, String sort, int page, int size) {
         if (!isCacheable(brandId, sort, page, size)) {
             return loadProducts(brandId, sort, page, size);
         }
 
-        Optional<List<ProductInfo>> cached = productListCache.find(brandId, page).flatMap(this::withCurrentStock);
-        if (cached.isPresent()) {
-            return cached.get();
+        Optional<List<CachedProductItem>> cachedItems = productListCache.find(brandId, page);
+        if (cachedItems.isPresent()) {
+            Optional<List<ProductInfo>> withStock = withCurrentStock(cachedItems.get());
+            if (withStock.isPresent()) {
+                countCache("hit");
+                return withStock.get();
+            }
+            countCache("hit_check_failed");
+        } else {
+            countCache("miss");
         }
 
         List<ProductInfo> infos = loadProducts(brandId, sort, page, size);
         productListCache.save(brandId, page, infos.stream().map(this::toCachedItem).toList());
         return infos;
+    }
+
+    private void countCache(String result) {
+        meterRegistry.counter(CACHE_METRIC, "result", result).increment();
     }
 
     private boolean isCacheable(Long brandId, String sort, int page, int size) {

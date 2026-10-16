@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.loopers.config.cache.ProductCacheRedisConfig;
 import com.loopers.domain.product.CachedProductItem;
 import com.loopers.domain.product.ProductListCache;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DataAccessException;
@@ -32,15 +33,20 @@ public class RedisProductListCache implements ProductListCache {
     private static final Duration TTL = Duration.ofSeconds(30);
     private static final TypeReference<List<CachedProductItem>> ITEM_LIST = new TypeReference<>() { };
 
+    private static final String CACHE_METRIC = "product.list.cache";
+
     private final RedisTemplate<String, String> redisTemplate;
     private final ObjectMapper objectMapper;
+    private final MeterRegistry meterRegistry;
 
     public RedisProductListCache(
         @Qualifier(ProductCacheRedisConfig.PRODUCT_CACHE_REDIS_TEMPLATE) RedisTemplate<String, String> redisTemplate,
-        ObjectMapper objectMapper
+        ObjectMapper objectMapper,
+        MeterRegistry meterRegistry
     ) {
         this.redisTemplate = redisTemplate;
         this.objectMapper = objectMapper;
+        this.meterRegistry = meterRegistry;
     }
 
     @Override
@@ -53,9 +59,11 @@ public class RedisProductListCache implements ProductListCache {
             }
             return Optional.of(objectMapper.readValue(json, ITEM_LIST));
         } catch (DataAccessException e) {
+            countError("find_error");
             log.warn("상품 목록 캐시 조회 실패, DB 로 우회한다. key={}", key, e);
             return Optional.empty();
         } catch (JsonProcessingException e) {
+            countError("find_error");
             log.warn("상품 목록 캐시 역직렬화 실패, DB 로 우회한다. key={}", key, e);
             return Optional.empty();
         }
@@ -67,10 +75,16 @@ public class RedisProductListCache implements ProductListCache {
         try {
             redisTemplate.opsForValue().set(key, objectMapper.writeValueAsString(items), TTL);
         } catch (DataAccessException e) {
+            countError("save_error");
             log.warn("상품 목록 캐시 저장 실패, 이번 응답은 캐시 없이 반환한다. key={}", key, e);
         } catch (JsonProcessingException e) {
+            countError("save_error");
             log.warn("상품 목록 캐시 직렬화 실패, 이번 응답은 캐시 없이 반환한다. key={}", key, e);
         }
+    }
+
+    private void countError(String result) {
+        meterRegistry.counter(CACHE_METRIC, "result", result).increment();
     }
 
     /**
@@ -88,6 +102,7 @@ public class RedisProductListCache implements ProductListCache {
                 try {
                     redisTemplate.delete(keys);
                 } catch (DataAccessException e) {
+                    countError("evict_error");
                     log.warn("상품 목록 캐시 삭제 실패, TTL 만료까지 이전 목록이 남을 수 있다. keys={}", keys, e);
                 }
             }

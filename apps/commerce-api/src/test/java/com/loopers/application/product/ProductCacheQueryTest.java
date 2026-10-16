@@ -4,6 +4,7 @@ import com.loopers.config.cache.ProductCacheRedisConfig;
 import com.loopers.utils.DatabaseCleanUp;
 import com.loopers.utils.RedisCleanUp;
 import com.loopers.utils.SqlCounter;
+import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -33,6 +34,7 @@ class ProductCacheQueryTest {
 
     private final ProductFacade productFacade;
     private final RedisTemplate<String, String> cacheRedisTemplate;
+    private final MeterRegistry meterRegistry;
     private final EntityManager entityManager;
     private final TransactionTemplate transactionTemplate;
     private final DatabaseCleanUp databaseCleanUp;
@@ -44,6 +46,7 @@ class ProductCacheQueryTest {
     public ProductCacheQueryTest(
         ProductFacade productFacade,
         @Qualifier(ProductCacheRedisConfig.PRODUCT_CACHE_REDIS_TEMPLATE) RedisTemplate<String, String> cacheRedisTemplate,
+        MeterRegistry meterRegistry,
         EntityManager entityManager,
         PlatformTransactionManager transactionManager,
         DatabaseCleanUp databaseCleanUp,
@@ -51,6 +54,7 @@ class ProductCacheQueryTest {
     ) {
         this.productFacade = productFacade;
         this.cacheRedisTemplate = cacheRedisTemplate;
+        this.meterRegistry = meterRegistry;
         this.entityManager = entityManager;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.databaseCleanUp = databaseCleanUp;
@@ -145,9 +149,12 @@ class ProductCacheQueryTest {
     @DisplayName("캐시 조건 밖의 요청은, ")
     @Nested
     class OutOfCacheCondition {
-        @DisplayName("브랜드 없음 / latest / size 30 / page 3 모두 Redis 에 키를 만들지 않는다.")
+        @DisplayName("브랜드 없음 / latest / size 30 / page 3 모두 Redis 에 키를 만들지 않고, 카운터도 세지 않는다.")
         @Test
         void doesNotCreateKeys() {
+            // arrange
+            CacheCounterSnapshot before = CacheCounterSnapshot.take(meterRegistry);
+
             // act
             productFacade.getProducts(null, "price_asc", 0, 20);
             productFacade.getProducts(7L, "latest", 0, 20);
@@ -156,6 +163,47 @@ class ProductCacheQueryTest {
 
             // assert
             assertThat(cacheRedisTemplate.keys("products:*")).isEmpty();
+            assertThat(before.deltaTo(CacheCounterSnapshot.take(meterRegistry))).isEqualTo(CacheCounterSnapshot.none());
+        }
+    }
+
+    @DisplayName("캐시 카운터(product.list.cache)는, ")
+    @Nested
+    class CacheCounters {
+        @DisplayName("miss 1회는 miss 만 1 늘고, 이어지는 hit 1회는 hit 만 1 는다.")
+        @Test
+        void countsMissThenHit() {
+            // act & assert: miss
+            CacheCounterSnapshot before = CacheCounterSnapshot.take(meterRegistry);
+            queryFixturePage();
+            assertThat(before.deltaTo(CacheCounterSnapshot.take(meterRegistry)))
+                .isEqualTo(CacheCounterSnapshot.only("miss"));
+
+            // act & assert: hit
+            before = CacheCounterSnapshot.take(meterRegistry);
+            queryFixturePage();
+            assertThat(before.deltaTo(CacheCounterSnapshot.take(meterRegistry)))
+                .isEqualTo(CacheCounterSnapshot.only("hit"));
+        }
+
+        @DisplayName("캐시 상품이 삭제돼 DB 로 전환하면 hit_check_failed 만 1 는다 (hit·miss 는 0).")
+        @Test
+        void countsHitCheckFailed_whenCachedProductIsDeleted() {
+            // arrange
+            queryFixturePage();
+            Long deletedId = ProductQueryFixture.EXPECTED_PAGE_0.get(0).productId();
+            transactionTemplate.executeWithoutResult(status -> entityManager
+                .createNativeQuery("UPDATE products SET deleted_at = NOW() WHERE id = :id")
+                .setParameter("id", deletedId)
+                .executeUpdate());
+            CacheCounterSnapshot before = CacheCounterSnapshot.take(meterRegistry);
+
+            // act
+            queryFixturePage();
+
+            // assert
+            assertThat(before.deltaTo(CacheCounterSnapshot.take(meterRegistry)))
+                .isEqualTo(CacheCounterSnapshot.only("hit_check_failed"));
         }
     }
 }

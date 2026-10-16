@@ -8,6 +8,7 @@ import com.loopers.config.cache.ProductCacheRedisConfig;
 import com.loopers.infrastructure.product.RedisProductListCache;
 import com.loopers.utils.DatabaseCleanUp;
 import com.loopers.utils.SqlCounter;
+import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.persistence.EntityManagerFactory;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -77,6 +78,7 @@ class ProductCacheRedisOutageTest {
     private final ProductFacade productFacade;
     private final LikeFacade likeFacade;
     private final RedisTemplate<String, String> cacheRedisTemplate;
+    private final MeterRegistry meterRegistry;
     private final EntityManagerFactory entityManagerFactory;
     private final JdbcTemplate jdbcTemplate;
     private final DatabaseCleanUp databaseCleanUp;
@@ -89,6 +91,7 @@ class ProductCacheRedisOutageTest {
         ProductFacade productFacade,
         LikeFacade likeFacade,
         @Qualifier(ProductCacheRedisConfig.PRODUCT_CACHE_REDIS_TEMPLATE) RedisTemplate<String, String> cacheRedisTemplate,
+        MeterRegistry meterRegistry,
         EntityManagerFactory entityManagerFactory,
         JdbcTemplate jdbcTemplate,
         DatabaseCleanUp databaseCleanUp
@@ -96,6 +99,7 @@ class ProductCacheRedisOutageTest {
         this.productFacade = productFacade;
         this.likeFacade = likeFacade;
         this.cacheRedisTemplate = cacheRedisTemplate;
+        this.meterRegistry = meterRegistry;
         this.entityManagerFactory = entityManagerFactory;
         this.jdbcTemplate = jdbcTemplate;
         this.databaseCleanUp = databaseCleanUp;
@@ -114,6 +118,10 @@ class ProductCacheRedisOutageTest {
         cacheLogger().detachAppender(cacheLogs);
         sqlCounter.disable();
         databaseCleanUp.truncateAllTables();
+        // 어떤 테스트가 중단 상태에서 실패해도 다음 테스트가 꺼진 Redis 를 물려받지 않게 한다
+        if (!DEDICATED_REDIS.isRunning()) {
+            DEDICATED_REDIS.start();
+        }
         if (DEDICATED_REDIS.isRunning()) {
             Set<String> keys = cacheRedisTemplate.keys("products:*");
             if (keys != null && !keys.isEmpty()) {
@@ -198,7 +206,11 @@ class ProductCacheRedisOutageTest {
         assertThat(DEDICATED_REDIS.isRunning()).isFalse();
 
         List<ProductInfo> duringOutage = new ArrayList<>();
+        CacheCounterSnapshot beforeOutageQuery = CacheCounterSnapshot.take(meterRegistry);
         long outageQueryMs = timedQuery(duringOutage);
+        assertThat(beforeOutageQuery.deltaTo(CacheCounterSnapshot.take(meterRegistry)))
+            .as("중단 중 조회 1회: find_error 1, miss 1, save_error 1, hit 0")
+            .isEqualTo(CacheCounterSnapshot.only("find_error", "miss", "save_error"));
         ProductInfo updated = productFacade.updateProduct(FIRST_PRODUCT_ID, "중단 중 수정", NEW_PRICE);
         boolean liked = likeFacade.like(15L, 6006L); // 브랜드 7 이지만 첫 페이지 밖(가격 22,322)인 상품
         List<String> warnsDuringOutage = warnMessages();

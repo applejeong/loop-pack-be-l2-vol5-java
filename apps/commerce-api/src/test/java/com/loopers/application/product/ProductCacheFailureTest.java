@@ -11,6 +11,7 @@ import com.loopers.infrastructure.point.PointJpaRepository;
 import com.loopers.infrastructure.product.RedisProductListCache;
 import com.loopers.utils.DatabaseCleanUp;
 import com.loopers.utils.RedisCleanUp;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -64,7 +65,8 @@ class ProductCacheFailureTest {
         FaultInjectingProductListCache faultInjectingProductListCache(
             RedisProductListCache realCache,
             @Qualifier(ProductCacheRedisConfig.PRODUCT_CACHE_REDIS_TEMPLATE) RedisTemplate<String, String> cacheRedisTemplate,
-            ObjectMapper objectMapper
+            ObjectMapper objectMapper,
+            MeterRegistry meterRegistry
         ) {
             RedisTemplate<String, String> failingDelete = new RedisTemplate<>() {
                 @Override
@@ -78,7 +80,8 @@ class ProductCacheFailureTest {
             failingDelete.setConnectionFactory(cacheRedisTemplate.getConnectionFactory());
             failingDelete.afterPropertiesSet();
 
-            return new FaultInjectingProductListCache(realCache, new RedisProductListCache(failingDelete, objectMapper));
+            return new FaultInjectingProductListCache(
+                realCache, new RedisProductListCache(failingDelete, objectMapper, meterRegistry));
         }
     }
 
@@ -92,6 +95,7 @@ class ProductCacheFailureTest {
     private final PointJpaRepository pointJpaRepository;
     private final FaultInjectingProductListCache faultInjectingCache;
     private final RedisTemplate<String, String> cacheRedisTemplate;
+    private final MeterRegistry meterRegistry;
     private final TransactionTemplate transactionTemplate;
     private final JdbcTemplate jdbcTemplate;
     private final DatabaseCleanUp databaseCleanUp;
@@ -104,6 +108,7 @@ class ProductCacheFailureTest {
         PointJpaRepository pointJpaRepository,
         ProductListCache productListCache,
         @Qualifier(ProductCacheRedisConfig.PRODUCT_CACHE_REDIS_TEMPLATE) RedisTemplate<String, String> cacheRedisTemplate,
+        MeterRegistry meterRegistry,
         PlatformTransactionManager transactionManager,
         JdbcTemplate jdbcTemplate,
         DatabaseCleanUp databaseCleanUp,
@@ -114,6 +119,7 @@ class ProductCacheFailureTest {
         this.pointJpaRepository = pointJpaRepository;
         this.faultInjectingCache = (FaultInjectingProductListCache) productListCache;
         this.cacheRedisTemplate = cacheRedisTemplate;
+        this.meterRegistry = meterRegistry;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.jdbcTemplate = jdbcTemplate;
         this.databaseCleanUp = databaseCleanUp;
@@ -229,6 +235,23 @@ class ProductCacheFailureTest {
             // assert: 비싸진 5406 은 첫 페이지에서 빠진다
             assertThat(afterExpiry).containsExactlyElementsOf(expectedWithoutFirst());
             assertThat(cacheRedisTemplate.hasKey(CACHE_KEY)).isTrue();
+        }
+
+        @DisplayName("commit 뒤 삭제 실패 1회는 evict_error 만 1 늘고, 쓰기 자체는 성공이다.")
+        @Test
+        void countsEvictError() {
+            // arrange
+            fillCache();
+            faultInjectingCache.setMode(FaultInjectingProductListCache.Mode.FAIL_EVICT_DELETE);
+            CacheCounterSnapshot before = CacheCounterSnapshot.take(meterRegistry);
+
+            // act
+            productFacade.updateProduct(FIRST_PRODUCT_ID, "새 이름", NEW_PRICE);
+
+            // assert
+            assertThat(priceInDb(FIRST_PRODUCT_ID)).isEqualTo(NEW_PRICE);
+            assertThat(before.deltaTo(CacheCounterSnapshot.take(meterRegistry)))
+                .isEqualTo(CacheCounterSnapshot.only("evict_error"));
         }
 
         @DisplayName("상품 삭제라면 캐시 키가 남아 있어도 삭제 상품은 조회 결과에 없다 (hit 의 삭제 여부 확인).")
