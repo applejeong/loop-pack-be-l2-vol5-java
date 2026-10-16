@@ -3,9 +3,12 @@ package com.loopers.application.product;
 import com.loopers.domain.brand.Brand;
 import com.loopers.domain.brand.BrandRepository;
 import com.loopers.domain.like.LikeService;
+import com.loopers.domain.product.CachedProductItem;
 import com.loopers.domain.product.Price;
 import com.loopers.domain.product.Product;
+import com.loopers.domain.product.ProductListCache;
 import com.loopers.domain.product.ProductService;
+import com.loopers.domain.product.ProductSortType;
 import com.loopers.support.error.CoreException;
 import com.loopers.support.error.ErrorType;
 import lombok.RequiredArgsConstructor;
@@ -14,6 +17,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -21,11 +25,73 @@ import java.util.stream.Collectors;
 @Component
 public class ProductFacade {
 
+    private static final int CACHED_PAGE_SIZE = 20;
+    private static final int CACHED_LAST_PAGE = 2;
+
     private final ProductService productService;
     private final BrandRepository brandRepository;
     private final LikeService likeService;
+    private final ProductListCache productListCache;
 
+    /**
+     * 브랜드 필터 + 가격순 + 20개 + 0~2페이지 요청만 캐시를 거친다. 그 외는 DB 경로 그대로다.
+     * hit 는 캐시 목록에 현재 재고를 붙여 응답하고, 캐시 안에 삭제된 상품이 섞여 있으면 DB 경로로 돌아가 다시 저장한다.
+     */
     public List<ProductInfo> getProducts(Long brandId, String sort, int page, int size) {
+        if (!isCacheable(brandId, sort, page, size)) {
+            return loadProducts(brandId, sort, page, size);
+        }
+
+        Optional<List<ProductInfo>> cached = productListCache.find(brandId, page).flatMap(this::withCurrentStock);
+        if (cached.isPresent()) {
+            return cached.get();
+        }
+
+        List<ProductInfo> infos = loadProducts(brandId, sort, page, size);
+        productListCache.save(brandId, page, infos.stream().map(this::toCachedItem).toList());
+        return infos;
+    }
+
+    private boolean isCacheable(Long brandId, String sort, int page, int size) {
+        return brandId != null
+            && ProductSortType.PRICE_ASC.getValue().equals(sort)
+            && size == CACHED_PAGE_SIZE
+            && page >= 0
+            && page <= CACHED_LAST_PAGE;
+    }
+
+    /**
+     * 캐시 목록에 DB 의 현재 재고를 붙인다. 삭제된 상품이 섞여 있으면(재고 조회 건수 불일치) empty 를 돌려 DB 경로로 보낸다.
+     */
+    private Optional<List<ProductInfo>> withCurrentStock(List<CachedProductItem> items) {
+        if (items.isEmpty()) {
+            return Optional.of(List.of());
+        }
+
+        Map<Long, Integer> stocks = productService.getActiveStockQuantities(
+            items.stream().map(CachedProductItem::productId).toList());
+        if (stocks.size() != items.size()) {
+            return Optional.empty();
+        }
+
+        return Optional.of(items.stream()
+            .map(item -> new ProductInfo(
+                item.productId(),
+                item.productName(),
+                item.price(),
+                stocks.get(item.productId()),
+                item.brandId(),
+                item.brandName(),
+                item.likeCount()))
+            .toList());
+    }
+
+    private CachedProductItem toCachedItem(ProductInfo info) {
+        return new CachedProductItem(
+            info.productId(), info.productName(), info.price(), info.brandId(), info.brandName(), info.likeCount());
+    }
+
+    private List<ProductInfo> loadProducts(Long brandId, String sort, int page, int size) {
         List<Product> products = productService.getProducts(brandId, sort, page, size);
         if (products.isEmpty()) {
             return List.of();

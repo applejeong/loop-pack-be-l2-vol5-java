@@ -1,6 +1,7 @@
 package com.loopers.application.product;
 
 import com.loopers.utils.DatabaseCleanUp;
+import com.loopers.utils.RedisCleanUp;
 import com.loopers.utils.SqlCounter;
 import jakarta.persistence.EntityManagerFactory;
 import org.junit.jupiter.api.AfterEach;
@@ -27,6 +28,7 @@ class ProductFacadeSqlCountTest {
     private final ProductFacade productFacade;
     private final EntityManagerFactory entityManagerFactory;
     private final DatabaseCleanUp databaseCleanUp;
+    private final RedisCleanUp redisCleanUp;
 
     private SqlCounter sqlCounter;
 
@@ -34,11 +36,13 @@ class ProductFacadeSqlCountTest {
     public ProductFacadeSqlCountTest(
         ProductFacade productFacade,
         EntityManagerFactory entityManagerFactory,
-        DatabaseCleanUp databaseCleanUp
+        DatabaseCleanUp databaseCleanUp,
+        RedisCleanUp redisCleanUp
     ) {
         this.productFacade = productFacade;
         this.entityManagerFactory = entityManagerFactory;
         this.databaseCleanUp = databaseCleanUp;
+        this.redisCleanUp = redisCleanUp;
     }
 
     @BeforeEach
@@ -50,6 +54,8 @@ class ProductFacadeSqlCountTest {
     void tearDown() {
         sqlCounter.disable();
         databaseCleanUp.truncateAllTables();
+        // 브랜드 필터 + 가격순 첫 페이지 호출은 캐시 키를 남기므로 다른 테스트에 새지 않게 지운다
+        redisCleanUp.truncateAll();
     }
 
     @DisplayName("고객이 상품 목록을 조회할 때, ")

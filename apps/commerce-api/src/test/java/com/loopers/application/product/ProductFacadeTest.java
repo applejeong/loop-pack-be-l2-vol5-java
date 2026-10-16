@@ -5,6 +5,7 @@ import com.loopers.domain.brand.BrandRepository;
 import com.loopers.domain.like.LikeService;
 import com.loopers.domain.product.Price;
 import com.loopers.domain.product.Product;
+import com.loopers.domain.product.ProductListCache;
 import com.loopers.domain.product.ProductService;
 import com.loopers.support.error.CoreException;
 import com.loopers.support.error.ErrorType;
@@ -44,6 +45,9 @@ class ProductFacadeTest {
 
     @Mock
     private LikeService likeService;
+
+    @Mock
+    private ProductListCache productListCache;
 
     @InjectMocks
     private ProductFacade productFacade;
