@@ -7,10 +7,16 @@
 ## 2.구조와 의존
 |계층|역할|의존금지|
 |--|--|--|
-|interfaces| HTTP 요청/응답 처리 | infrastructure
-|application| 유스케이스 조율 | controller DTO, infrastructure 구현 |
-|domain|상태·규칙, repository 인터페이스 | interfaces, application, infrastructure |
-|infrastructure|repository의 JPA 구현 | - |
+|interfaces| HTTP 요청/응답 처리 | infrastructure |
+|application| 유스케이스 조율 | interfaces, infrastructure |
+|domain|상태·규칙, repository·캐시 인터페이스, 캐시용 데이터(CachedProductItem) | interfaces, application, infrastructure |
+|infrastructure|repository의 JPA 구현, 캐시의 Redis 구현 | - |
+
+- 캐시 포트: domain/product/ProductListCache(인터페이스) → infrastructure/product/RedisProductListCache(구현). Repository와 같은 "domain 인터페이스 → infrastructure 구현" 방식이며, Repository 외 첫 사례다.
+- 캐시용 데이터 CachedProductItem은 domain에 둔다. domain은 application에 의존할 수 없어 application의 ProductInfo를 캐시 포트에서 쓸 수 없기 때문.
+- domain 안 like → product 의존 신설: LikeService가 ProductRepository·ProductListCache를 사용한다. 좋아요의 트랜잭션 경계가 LikeService라 commit 후 무효화 등록을 Service 안에서 해야 하고, 지울 캐시 키를 정하려면 상품의 brandId가 필요하기 때문.
+- 설정: config/cache/ProductCacheRedisConfig가 캐시 전용 Redis 연결을 만든다. modules/redis의 기존 설정(기본·master 연결)은 그대로 둔다. 기존 기본 연결은 replica 우선 읽기·대기 60초라 캐시에 그대로 쓰기 어렵고, 공통 모듈 설정을 바꾸지 않으려고 캐시 전용 연결을 분리했다.
+- ArchUnit: 기존 규칙 3개(domain → 바깥 계층 금지, application → interfaces·infrastructure 금지, interfaces → infrastructure 금지)는 변경 없이 모두 통과한다.
 
 ## 3.도메인 관계
 | 관계                          | 다중성   | 연결 방식                                              | 필요한 이유                                                                                | 책임 주체                                                                          |
