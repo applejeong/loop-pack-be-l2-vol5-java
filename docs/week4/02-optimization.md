@@ -278,6 +278,7 @@ step2 10회: 0.0092, 0.0085, 0.0074, 0.0078, 0.0077, 0.0071, 0.0074, 0.0074, 0.0
 - `BrandJpaRepository.findAllByIdIn` 에 `@Transactional(readOnly = true)` (77ba157). 인터페이스에 선언한 쿼리 메서드에는 `SimpleJpaRepository` 의 클래스 `@Transactional(readOnly = true)` 가 적용되지 않는다 (spring-data-commons 3.4.4 `TransactionalRepositoryProxyPostProcessor.computeTransactionAttribute`: 대상 클래스에 구현 메서드가 없으면 null). 붙이지 않으면 브랜드 조회가 autocommit 으로 실행돼 요청당 commit 3 → 2, set_option 12 → 8 로 step2 와 부수 문장 조건이 달라진다 (특이사항의 폐기분 참고).
 - 테스트: `ProductFacadeTest` 의 `findById(1L)` 스텁을 `findAllByIdIn(eq(Set.of(1L)))` 로 교체 (`ReflectionTestUtils.setField` 로 Brand id 1L 설정). `AdminCrudV1ApiE2ETest.GetListsAsAdmin` 에 "브랜드 삭제 후 관리자 상품 목록에서 브랜드명이 그대로 나온다" 추가 (변경 전 코드도 만족하는 회귀 방지 테스트, IN 쿼리에 deleted_at 조건이 들어가면 실패). 삭제 브랜드명 노출·브랜드 없음 → null 을 직접 확인하는 단위 테스트는 추가하지 않았다.
 - 테스트 명령: `./gradlew :apps:commerce-api:test --tests '*Brand*' --tests '*Product*' --tests '*Like*' --tests '*ArchitectureTest'` BUILD SUCCESSFUL (77ba157 기준 실행, 165건 통과, 실패·오류·skip 0).
+- 측정 후 추가 (커밋 `2549586`, 아래 표에는 미포함): `ProductRepositoryTest.FindAll` 에 likes_desc 페이지 경계 테스트 "좋아요 많은 순 정렬은 페이지 안이 아니라 전체 기준으로 적용되어, 가장 늦게 저장된 상품이라도 좋아요가 가장 많으면 첫 페이지 첫 번째로 조회된다" (상품 3개, size 2, 좋아요 최다 상품을 마지막에 저장). 기존 동작 확인용이라 처음부터 통과. `./gradlew :apps:commerce-api:test --tests '*ProductRepositoryTest*'` FindAll 8건(기존 7 + 1) 통과, 실패·skip 0.
 
 | 테스트 클래스 | 실행 | 실패 | 오류 | skip |
 |---|---|---|---|---|
@@ -445,6 +446,9 @@ step3 10회: 0.0088, 0.0074, 0.0075, 0.0084, 0.0073, 0.0067, 0.0067, 0.0066, 0.0
 
 ## 측정하지 않은 범위
 
-- 브랜드 필터 없는 likes_desc(전체 상품 대상 좋아요순)는 측정하지 않았다. B(브랜드 7, 상품 100개)는 인덱스로 개선돼도, 필터가 없으면 전체 상품의 좋아요를 세고 정렬해야 하므로 상품 수가 늘면 비용이 계속 커질 수 있다. 이 경우 like_count 같은 구조 변경이 필요한지는 확인하지 않았다.
+- 브랜드 필터 없는 likes_desc(B', `GET /api/v1/products?sort=likes_desc&page=0&size=20`)는 정식 측정 대상에 넣지 않았고 step3 이후 1회만 확인했다 (참고값(1회), 근거 `perf/step3/Bprime-sql.txt`·`Bprime-explain.txt`). 계정 기준 SELECT 3, 상품 목록 쿼리 rows_examined 233,057 (B 는 2,328), 정렬 서브쿼리 loops 10,000 (B 는 100), Sort 노드 30.3 ms (B 는 0.55 ms), 1회 호출 0.060초.
+    - 필터가 없으면 전체 상품의 좋아요를 세어 정렬하므로 비용이 상품 수와 좋아요 수에 비례해 커진다.
+    - like_count 비정규화로 줄일 수 있으나, 좋아요 쓰기의 정합성·동시성과 주문과의 잠금 순서 비용 때문에 이번 주에는 미뤘다.
+    - 정렬 서브쿼리(상품마다 count)와 좋아요 집계(IN 20 group by)가 1페이지 상품 20개의 좋아요를 두 번 센다 (B' 는 5,470건, B 는 850건).
 - 상품은 논리 삭제이고 복구 기능을 쓰지 않아 삭제 상품이 누적되므로 deleted_at 을 인덱스에 포함했다. 현재 seed 에는 삭제 상품이 없어 deleted_at 포함 효과는 측정하지 않았다.
 - 인덱스가 brand_id 로 시작하므로 브랜드 필터가 없는 C(가격순 전체)는 이 인덱스로 정렬을 처리하지 못한다.
