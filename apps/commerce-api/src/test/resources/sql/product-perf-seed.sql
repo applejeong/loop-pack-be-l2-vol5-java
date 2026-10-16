@@ -1,8 +1,8 @@
--- 상품 조회 성능 측정용 seed (로컬 docker MySQL 전용)
+-- 상품 조회 성능 측정용 seed (로컬 docker MySQL 수동 실행, 테스트 재사용용. 앱이 자동 실행하는 파일 아님)
 --
 -- 전제: 앱을 local 프로필로 기동해 테이블이 만들어진 상태 (ddl-auto: create)
 -- 실행: docker compose -f ./docker/infra-compose.yml exec -T mysql \
---         mysql -uapplication -papplication loopers < docker/mysql/seed/product-perf-seed.sql
+--         mysql -uapplication -papplication loopers < apps/commerce-api/src/test/resources/sql/product-perf-seed.sql
 -- 검증: product-perf-verify.sql
 --
 -- 랜덤 없이 아래 공식으로만 생성하므로 다시 실행해도 같은 결과가 나온다.

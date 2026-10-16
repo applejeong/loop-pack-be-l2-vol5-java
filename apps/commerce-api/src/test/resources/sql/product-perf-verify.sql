@@ -1,7 +1,7 @@
 -- product-perf-seed.sql 검증 쿼리
 --
 -- 실행: docker compose -f ./docker/infra-compose.yml exec -T mysql \
---         mysql -uapplication -papplication loopers --table < docker/mysql/seed/product-perf-verify.sql
+--         mysql -uapplication -papplication loopers --table < apps/commerce-api/src/test/resources/sql/product-perf-verify.sql
 --
 -- 모든 행의 ok 가 'OK' 이고 마지막 mismatch 가 0 이면 seed 가 공식대로 들어간 것이다.
 

@@ -397,7 +397,7 @@ AI와 설계 다듬기
 - 측정 도구·표본 수: 미정
 
 ### 7-3. 측정 데이터
-- docker/mysql/seed/product-perf-seed.sql, product-perf-verify.sql (로컬 docker MySQL 전용, 앱 자동 실행 경로 아님)
+- apps/commerce-api/src/test/resources/sql/product-perf-seed.sql, product-perf-verify.sql (로컬 docker MySQL 수동 실행과 테스트에서 재사용, 앱 자동 실행 경로 아님)
 - 브랜드 100, 사용자 1000, 상품 10000, 좋아요 223,037 (공식 기반, 재실행 시 동일 결과)
 - 가격 동점의 id DESC 는 ProductRepositoryTest.appliesSecondarySort_whenPrimarySortIsTied 로 확인 (price_asc 만 커버)
 
