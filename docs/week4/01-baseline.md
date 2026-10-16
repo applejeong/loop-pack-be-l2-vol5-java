@@ -198,3 +198,21 @@ EXPLAIN ANALYZE
 | `baseline/` | `k6-A-vu5-r{1,2,3}.json/.txt/-sql.txt`, `k6-A-vu5-run.log` | VU 5명 동일 |
 | `baseline/` | `B-sql.txt`, `B-response.json`, `B-explain.sql`, `B-explain.txt`, `B-10calls.txt`, `B-10calls-sql.txt` | B |
 | `baseline/` | `C-sql.txt`, `C-response.json` | C |
+
+## 6. 개선 전 테스트 상태
+
+2026-10-16 12:46 KST, HEAD `ad2a597`, 코드 변경 없음. `./gradlew :apps:commerce-api:test --tests '*Product*'` 실행 결과 BUILD SUCCESSFUL.
+
+| 테스트 클래스 | 실행 | 실패 | 오류 | skip |
+|---|---|---|---|---|
+| ProductRepositoryTest (동률 시 id 역순 `appliesSecondarySort_whenPrimarySortIsTied` 포함) | 12 | 0 | 0 | 0 |
+| ProductV1ApiE2ETest (GET /api/v1/products 4, 상세 2, 관리자 재고 3) | 9 | 0 | 0 | 0 |
+| ProductFacadeTest | 11 | 0 | 0 | 0 |
+| ProductServiceTest | 22 | 0 | 0 | 0 |
+| ProductSortTypeTest | 3 | 0 | 0 | 0 |
+| ProductTest | 12 | 0 | 0 | 0 |
+| AdminCrudV1ApiE2ETest (상품 등록·수정·삭제 중첩 클래스) | 7 | 0 | 0 | 0 |
+| LikeServiceTest (상품 좋아요 수 집계 중첩 클래스) | 1 | 0 | 0 | 0 |
+| 합계 | 77 | 0 | 0 | 0 |
+
+- 테스트 DB 는 Testcontainers MySQL 8.0 이다. `modules/jpa` testFixtures 의 `MySqlTestContainersConfig` 가 컨테이너를 띄우고 `datasource.mysql-jpa.main.jdbc-url` 을 매핑 포트(이번 실행은 `localhost:52705`)로 덮어쓴다. 측정용 로컬 MySQL(`docker-mysql-1`, 3306)과 별개이며, 테스트 전후 로컬 seed 건수(products 10000, likes 223,037, brands 100, users 1000)가 그대로였다.
