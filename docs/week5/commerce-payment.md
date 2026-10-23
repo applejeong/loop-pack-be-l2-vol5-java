@@ -122,7 +122,7 @@
 |---|---|---|
 | create 응답 | ⑤의 동기 응답 | 생성 수락(`PENDING`) 또는 효과 0건 확정 거절 |
 | callback | PG 알림 수신 → **PG 권위 조회 후** | 알림 본문의 상태 문자열만으로는 반영하지 않는다 |
-| reconcile | 사용자 요청 → **PG 권위 조회 후** | 콜백이 없을 때의 기본 복구 경로 |
+| reconcile | 사용자 요청 → **PG 권위 조회 후** | 콜백이 없을 때의 기본 복구 경로. 스케줄러(5-3 결정 ⑫)도 같은 조회·반영 경로를 쓴다 |
 
 > **과제 근거** (5. callback·조회·회복 전략)
 > "알림의 성공 문자열만으로 주문을 확정하지 않습니다. 고정한 PG adapter의 조회 결과에서 제공자 계정 범위·주문·transactionKey·저장 금액을 확인한 뒤 적용합니다."
@@ -134,7 +134,9 @@ create 응답이 `PENDING` 이면 ⑥에서 `REQUESTED` → `PENDING` 으로 바
 
 **미확인(UNKNOWN) 처리**
 
-timeout·응답 유실·조회 불가는 ⑥에서 `REQUESTED` → `UNKNOWN` 만 기록하고 **⑦⑧을 실행하지 않는다.** 조건은 `WHERE status = 'REQUESTED'` 로, 이미 `PENDING` 인 시도는 되돌리지 않는다. 주문은 `PAYMENT_PENDING`, 예약은 `RESERVED` 로 유지된다.
+create 의 timeout·응답 유실·증거 없는 오류는 ⑥에서 `REQUESTED` → `UNKNOWN` 만 기록하고 **⑦⑧을 실행하지 않는다.** 조건은 `WHERE status = 'REQUESTED'` 로, 이미 `PENDING` 인 시도는 되돌리지 않는다. 주문은 `PAYMENT_PENDING`, 예약은 `RESERVED` 로 유지된다.
+
+callback·reconcile·스케줄러의 **조회 실패**는 여기에 해당하지 않는다. 거래가 있는지에 대해 새로 안 것이 없으므로 시도 상태를 전혀 바꾸지 않는다. `REQUESTED` 도 `UNKNOWN` 으로 바꾸지 않는다 (5-6 결정 ⑳, 7-6 표).
 
 > **과제 근거** (2. 로컬 테스트 PG 계약과 adapter)
 > "반대로 timeout, 본문 없는 422, 다른 오류 code의 4xx·5xx, 잘못된 JSON·식별·금액은 효과 0건의 증거가 아닙니다. 다른 확정 결과가 없는 해당 시도는 UNKNOWN·예약 유지로 두고 기존 거래 조회 경로를 사용합니다."
@@ -169,8 +171,12 @@ flowchart TD
         P1 --> P2
     end
 
-    CB["callback 수신<br/>→ PG 권위 조회·검증"]
-    RC["reconcile 요청<br/>→ PG 권위 조회·검증"]
+    CB["callback 수신<br/>providerOrderId 로 시도 찾기 · 없으면 404<br/>종결이면 조회 없이 200 + 저장 결과"]
+    RC["reconcile 요청 · 스케줄러<br/>소유권·시도 확인 · 없으면 404<br/>종결이면 조회 없이 200 + 저장 결과"]
+    LK["PG 권위 조회 · 목록<br/>GET /api/v1/payments?orderId=providerOrderId<br/>대조: 주문 · 저장 key · callback 본문 key · 금액"]
+    LKF["조회 실패 → 상태 완전히 불변<br/>REQUESTED 도 UNKNOWN 으로 바꾸지 않음<br/>callback 5xx · reconcile 202 + lookupUnavailable"]
+    CONF["충돌 기록만 · 상태 불변 · ⑥ 거치지 않음<br/>2건 이상 · 주문·금액 불일치 · 저장 key 또는 본문 key 누락 · callback 의 0건<br/>callback 409 · reconcile 202 + lookupUnavailable"]
+    NONE["reconcile·스케줄러의 0건<br/>단순 미확인 · 충돌 아님 · 아무것도 바꾸지 않음<br/>reconcile 202 + 저장 상태"]
 
     subgraph TXB["로컬 TX B · 결과를 한 번만 반영"]
         direction TB
@@ -183,7 +189,7 @@ flowchart TD
     end
 
     UNK["⑥만 실행 · REQUESTED → UNKNOWN<br/>⑦⑧ 실행하지 않음<br/>주문 PAYMENT_PENDING · 예약 RESERVED 유지"]
-    PEND["⑥만 실행 · REQUESTED → PENDING + transactionKey 저장<br/>WHERE status IN REQUESTED·UNKNOWN<br/>⑦⑧ 실행하지 않음"]
+    PEND["⑥만 실행 · REQUESTED·UNKNOWN → PENDING + transactionKey 저장<br/>WHERE status IN REQUESTED·UNKNOWN · 이미 PENDING 이면 0행<br/>⑦⑧ 실행하지 않음"]
 
     REQ --> A1
     A1 -.->|"소유권·시도·DRAFT·재고 거절"| REJ
@@ -191,8 +197,13 @@ flowchart TD
     P2 -->|"202 PENDING<br/>생성 수락"| PEND
     P2 -->|"422 + 정확한 code + false<br/>+ orderId·amount 일치"| B1
     P2 -->|"timeout · 응답 유실<br/>본문 없는 422 · 기타 4xx·5xx"| UNK
-    CB --> B1
-    RC --> B1
+    CB --> LK
+    RC --> LK
+    LK -->|"1건 · 네 항목 일치<br/>SUCCESS · FAILED"| B1
+    LK -->|"1건 · 네 항목 일치<br/>PENDING"| PEND
+    LK -->|"조회 실패<br/>timeout · 회로 OPEN"| LKF
+    LK -->|"불일치 · 2건 이상<br/>callback 의 0건"| CONF
+    LK -->|"0건<br/>reconcile · 스케줄러"| NONE
 ```
 
 create 응답에서 `SUCCESS` 는 오지 않는다. 과제 계약이 생성 수락을 `202 PENDING` 으로 고정했기 때문이고, 검증된 `SUCCESS` 는 callback·reconcile 입구로만 들어온다.
@@ -593,6 +604,8 @@ PG 에는 성공한 거래가 남아 있고 내부에는 아무 흔적이 없다
 
 **판단:** 조회 중 예상 못 한 예외가 난 건도 실제로 PG 에 물어본 것이므로 `lookupCount` 를 1 올리고 `nextLookupAt` 을 갱신한다. 매번 예외가 나는 시도가 한도에 걸리지 않으면 끝없이 재시도되어 한도를 둔 목적과 어긋나기 때문이다. 서킷 OPEN 으로 조회 자체를 하지 않은 경우(세지 않음)와 구분한다.
 
+**판단:** 충돌 기록(`recordConflict`)은 `updatedAt` 을 갱신하고, 조회 기록(`recordLookup`)은 갱신하지 않는다. min-age 는 "마지막 업무 변경 후 경과 시간"인데, 조회 기록까지 변경으로 치면 매 조회마다 min-age 가 다시 걸려 `nextLookupAt` 과 이중으로 간격이 생기기 때문이다.
+
 기각: 모든 조회(사용자 reconcile 포함)를 셈. 사용자 연타로 한도가 소진되어 스케줄러가 멈추고, 그 뒤 사용자가 조회를 그치면 아무도 그 시도를 보지 않는다.
 
 **설정값.** 주기·최소 경과 시간·최대 조회 횟수·간격 증가 방식을 설정값(`payment.lookup.*`, **신규**)으로 둔다. 기본값은 확정이다. 기본 테스트 설정(아래 "테스트" 열)은 간격을 전부 0 으로 두어 "한도 소진 → 수동 확인 필요"를 짧은 테스트로 확인한다. 간격 증가 계산을 검증하는 테스트 하나만 0 이 아닌 값(예: 첫 간격 1분, 배수 2, 상한 4분)으로 설정을 덮어쓰고, `Clock` 을 움직여 `nextLookupAt` 이 1·2·4·4분으로 늘어나는지 확인한다. 그러려면 스케줄러가 현재 시각을 `Clock` 빈에서 읽어야 한다 (**신규**. 현재 코드에 `Clock` 빈은 없다).
@@ -671,7 +684,7 @@ PG 에는 성공한 거래가 남아 있고 내부에는 아무 흔적이 없다
 
 **판단 (순서 4):** 종결 뒤에는 조회 결과가 무엇이든 ⑥ 문지기가 0행이라 바뀌는 것이 없다 (8-1 금지 전이). 조회를 생략해도 결과가 같고, PG 조회 한도·회로 상태를 소모하지 않는다. 4-1 의 "같은 키 + 종결 → 200 + 저장된 결과" 와 같은 모양이다.
 
-**판단 (순서 5′, callback 과의 차이):** 조회 실패에 callback 은 5xx(7-5 결정 ⑬), reconcile 은 202 다. callback 의 응답 상대는 PG 라 "처리하지 못했다"를 알리는 것이 맞고, reconcile 의 응답 상대는 사용자라 과제가 "저장된 상태와 확인 불가를 반환"하라고 정했기 때문이다. 확인 불가 표시는 4-6 응답 `data` 에 한 칸(`lookupUnavailable`, **신규**. PG 조회 실패와 4단계 회로 차단 모두에서 `true`, 그 외 `false`)을 더해 담는다. 이름은 과제 문구 "확인 불가"에 맞췄다. "실패(failed)"로 두지 않은 이유는 회로 차단은 조회를 시도조차 하지 않은 경우라 실패가 아니기 때문이다. 시도가 `REQUESTED` 였다면 1장 규칙대로 `UNKNOWN` 으로 기록된 상태가 함께 담긴다. 5-4 결정 ⑥의 5xx 는 PG 조회는 됐는데 TX B 가 DB 오류로 rollback 된 경우라 이것과 다르다.
+**판단 (순서 5′, callback 과의 차이):** 조회 실패에 callback 은 5xx(7-5 결정 ⑬), reconcile 은 202 다. callback 의 응답 상대는 PG 라 "처리하지 못했다"를 알리는 것이 맞고, reconcile 의 응답 상대는 사용자라 과제가 "저장된 상태와 확인 불가를 반환"하라고 정했기 때문이다. 확인 불가 표시는 4-6 응답 `data` 에 한 칸(`lookupUnavailable`, **신규**. PG 조회 실패와 4단계 회로 차단 모두에서 `true`, 그 외 `false`)을 더해 담는다. 이름은 과제 문구 "확인 불가"에 맞췄다. "실패(failed)"로 두지 않은 이유는 회로 차단은 조회를 시도조차 하지 않은 경우라 실패가 아니기 때문이다. 조회 실패에 시도 상태는 완전히 불변이다. `REQUESTED` 도 `UNKNOWN` 으로 바꾸지 않는다. 8-1 전이 표에서 `UNKNOWN` 의 계기는 create 의 timeout·응답 유실뿐이고, 조회 실패는 거래 유무에 대해 새로 아는 것이 없기 때문이다. 5-4 결정 ⑥의 5xx 는 PG 조회는 됐는데 TX B 가 DB 오류로 rollback 된 경우라 이것과 다르다.
 
 **연타 제한은 두지 않는다.** reconcile 호출 횟수를 제한하지 않고, 스케줄러의 조회 한도에 합산하지도 않는다 (5-3 결정 ⑫). PG 보호는 4단계의 서킷브레이커가 맡는다.
 
@@ -788,7 +801,7 @@ adapter 의 `transactionKey` 단건 조회(`GET /api/v1/payments/{transactionKey
 |---|---|
 | 목록이 0건 (reconcile·스케줄러 입구) | 단순 미확인. 충돌 아님 |
 | 목록이 0건 (callback 입구) | 충돌 기록. callback 이 가져온 `transactionKey` 의 거래가 없다는 뜻이다 (결정 ⑬, 7-5) |
-| 우리가 저장한 `transactionKey` 가 목록에 없음 (목록은 1건 이상) | 충돌 기록 |
+| 우리가 저장한 `transactionKey` 또는 callback 본문의 `transactionKey` 가 목록에 없음 (목록은 1건 이상) | 충돌 기록 (사유: 거래 누락 `TRANSACTION_KEY_MISSING`) |
 
 **판단:** reconcile·스케줄러의 0건은 create 가 PG 에 닿지 않은 경우(3장 "호출 전 사망")에 정상적으로 생기는 상태다. 반면 PG 가 접수 key 를 발급해 줬는데 그 거래가 목록에 없다는 것은 이상 신호이므로 둘을 구분한다. callback 의 0건은 PG 가 보낸 key 자체가 목록에 없는 것이라 뒤쪽과 같은 성격이다.
 
@@ -864,8 +877,8 @@ adapter 의 `transactionKey` 단건 조회(`GET /api/v1/payments/{transactionKey
 | 2건 이상 | 그대로 | 기록 (사유: 복수 거래) | 그대로 | 유지 | 없음 | 409 `CONFLICT` |
 | 금액 불일치 | 그대로 | 기록 (사유: 금액) | 그대로 | 유지 | 없음 | 409 `CONFLICT` |
 | 주문(`providerOrderId`) 불일치 | 그대로 | 기록 (사유: 주문) | 그대로 | 유지 | 없음 | 409 `CONFLICT` |
-| 저장된 `transactionKey` 가 목록에 없음 | 그대로 | 기록 (사유: 거래 누락) | 그대로 | 유지 | 없음 | 409 `CONFLICT` |
-| 조회 실패 (timeout, 회로 OPEN) | `REQUESTED` 면 `UNKNOWN` 으로 기록 (1장 규칙), `PENDING` 이면 그대로, `UNKNOWN` 이면 그대로 | 없음 | 그대로 | 유지 | 없음 | 5xx (결정 ⑬) |
+| 저장된 `transactionKey` 또는 callback 본문의 `transactionKey` 가 목록에 없음 | 그대로 | 기록 (사유: 거래 누락) | 그대로 | 유지 | 없음 | 409 `CONFLICT` |
+| 조회 실패 (timeout, 회로 OPEN) | 그대로 (완전히 불변. `REQUESTED` 도 `UNKNOWN` 으로 바꾸지 않는다, 5-6 결정 ⑳) | 없음 | 그대로 | 유지 | 없음 | 5xx (결정 ⑬) |
 
 reconcile 입구도 같은 표를 따르되, 응답은 다르다. 과제가 reconcile 응답을 "저장된 상태와 확인 불가"로 정했으므로(5장 인용) 종결되지 않는 행(reconcile 입구의 0건, 조회 실패, `PENDING` 전이)은 202 + 저장 상태이고, 충돌 행(2건 이상·금액 불일치·저장 key 누락)도 충돌을 기록한 뒤 **202 + 저장 상태 + `lookupUnavailable=true`** 다. 예외를 던지지 않는다. callback 의 0건이 409 이고 조회 실패가 5xx 인 것과 다른 이유는 결정 ⑬의 판단 열에 있다.
 
