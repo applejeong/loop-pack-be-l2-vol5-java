@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -52,6 +53,8 @@ public class TestPaymentPgServer implements AutoCloseable {
     public TestPaymentPgServer() throws IOException {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/", this::handle);
+        // 기본 실행기는 단일 스레드라 보류된 요청 하나가 뒤의 요청을 전부 막는다. 연속 timeout 장면을 위해 풀로 바꾼다.
+        server.setExecutor(Executors.newCachedThreadPool());
         server.start();
     }
 

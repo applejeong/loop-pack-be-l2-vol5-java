@@ -365,6 +365,31 @@ class PaymentV1ApiE2ETest {
             assertThat(reservationStatusesOf(orderId)).containsExactly(StockReservation.Status.RESERVED);
             assertThat(stockOf(productId)).isEqualTo(3);
         }
+
+        @DisplayName("서킷이 차단 중이면, 조회 실패와 같이 5xx 이고 시도(REQUESTED 그대로)·주문·예약·재고는 불변이며 충돌도 기록하지 않는다 (설계 5-7 결정 ㉙).")
+        @Test
+        void returnsServerError_andKeepsEverything_whenCircuitIsOpen() {
+            // arrange
+            Long userId = saveUser();
+            Long productId = saveProduct(1000L, 3);
+            Long orderId = saveAttemptFixture(userId, productId, 2, "k1", PaymentAttempt.Status.REQUESTED, null);
+            fakePaymentGateway.willOpenCircuit();
+
+            // act
+            ResponseEntity<ApiResponse<PaymentV1Dto.CallbackResponse>> response =
+                callback(PaymentAttempt.providerOrderIdOf(orderId), "FAKE-TX-000001", "SUCCESS");
+
+            // assert
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+            assertThat(fakePaymentGateway.lookupCallCount()).isEqualTo(1);
+            PaymentAttempt attempt = attemptOf(orderId);
+            assertThat(attempt.getStatus()).isEqualTo(PaymentAttempt.Status.REQUESTED);
+            assertThat(attempt.getTransactionKey()).isNull();
+            assertThat(attempt.isConflicted()).isFalse();
+            assertThat(orderOf(orderId).getStatus()).isEqualTo(Order.OrderStatus.PAYMENT_PENDING);
+            assertThat(reservationStatusesOf(orderId)).containsExactly(StockReservation.Status.RESERVED);
+            assertThat(stockOf(productId)).isEqualTo(3);
+        }
     }
 
     @DisplayName("POST /api/v1/orders/{orderId}/payment/reconcile 을 요청하면, ")

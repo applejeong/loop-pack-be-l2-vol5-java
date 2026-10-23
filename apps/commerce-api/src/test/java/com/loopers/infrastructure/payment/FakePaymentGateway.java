@@ -37,6 +37,7 @@ public class FakePaymentGateway implements PaymentGateway {
 
     private volatile NextCreate nextCreate = NextCreate.ACCEPT_PENDING;
     private volatile boolean failLookups;
+    private volatile boolean circuitOpen;
     private volatile String throwOnLookupOf;
     private volatile boolean lookupSeenInsideTransaction;
     private final AtomicInteger createCount = new AtomicInteger();
@@ -65,10 +66,26 @@ public class FakePaymentGateway implements PaymentGateway {
     }
 
     /**
-     * 이후 목록 조회가 전부 UNAVAILABLE(timeout·회로 차단 흉내)이 된다. 거래는 그대로 있다.
+     * 이후 조회(목록·단건)가 전부 UNAVAILABLE(CALL_FAILED, timeout 흉내)이 된다. 거래는 그대로 있다.
      */
     public void willFailLookups() {
         failLookups = true;
+    }
+
+    /**
+     * 이후 조회(목록·단건)가 전부 UNAVAILABLE(CIRCUIT_OPEN, 서킷 차단 흉내)이 된다. 호출은 lookupCallCount 에 센다.
+     * 실제 adapter 에서는 서킷이 HTTP 호출을 막지만, Facade 가 보는 것은 결과 타입뿐이라 가짜는 결과만 흉내 낸다.
+     */
+    public void willOpenCircuit() {
+        circuitOpen = true;
+    }
+
+    /**
+     * 조회 실패·서킷 차단 흉내를 모두 풀어 정상 조회로 돌아간다. 거래·호출 횟수는 그대로다 ("회복 뒤" 장면용).
+     */
+    public void willServeLookups() {
+        failLookups = false;
+        circuitOpen = false;
     }
 
     /**
@@ -116,6 +133,7 @@ public class FakePaymentGateway implements PaymentGateway {
     public void reset() {
         nextCreate = NextCreate.ACCEPT_PENDING;
         failLookups = false;
+        circuitOpen = false;
         throwOnLookupOf = null;
         lookupSeenInsideTransaction = false;
         createCount.set(0);
@@ -148,8 +166,11 @@ public class FakePaymentGateway implements PaymentGateway {
         if (providerOrderId.equals(throwOnLookupOf)) {
             throw new IllegalStateException("테스트: 가짜 PG 조회 예외 " + providerOrderId);
         }
+        if (circuitOpen) {
+            return PaymentLookupResult.unavailable(PaymentLookupResult.UnavailableReason.CIRCUIT_OPEN);
+        }
         if (failLookups) {
-            return PaymentLookupResult.unavailable();
+            return PaymentLookupResult.unavailable(PaymentLookupResult.UnavailableReason.CALL_FAILED);
         }
         return PaymentLookupResult.found(transactions().stream()
             .filter(transaction -> transaction.providerOrderId().equals(providerOrderId))
@@ -157,13 +178,16 @@ public class FakePaymentGateway implements PaymentGateway {
     }
 
     /**
-     * 목록 조회와 같은 규칙이다. 있으면 FOUND + 1건, 없으면 FOUND + 0건, willFailLookups() 뒤에는 UNAVAILABLE.
+     * 목록 조회와 같은 규칙이다. 있으면 FOUND + 1건, 없으면 FOUND + 0건, willOpenCircuit()·willFailLookups() 뒤에는 UNAVAILABLE.
      */
     @Override
     public PaymentLookupResult findByTransactionKey(String transactionKey) {
         observeLookup();
+        if (circuitOpen) {
+            return PaymentLookupResult.unavailable(PaymentLookupResult.UnavailableReason.CIRCUIT_OPEN);
+        }
         if (failLookups) {
-            return PaymentLookupResult.unavailable();
+            return PaymentLookupResult.unavailable(PaymentLookupResult.UnavailableReason.CALL_FAILED);
         }
         PaymentTransaction transaction = transactions.get(transactionKey);
         return PaymentLookupResult.found(transaction == null ? List.of() : List.of(transaction));

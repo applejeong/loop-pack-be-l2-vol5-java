@@ -303,6 +303,59 @@ class PaymentScheduledLookupIntegrationTest {
         assertThat(attempt.isManualCheckRequired()).isFalse();
     }
 
+    @DisplayName("서킷이 차단 중이면, 첫 건에서 그 주기를 중단한다. 이후 시도는 조회하지 않고 어느 시도의 조회 횟수·다음 조회 시각도 바뀌지 않는다 (설계 5-7 결정 ㉙).")
+    @Test
+    void stopsCycleWithoutCounting_whenCircuitIsOpen() {
+        // arrange - 대상 2건
+        Long userId = saveUser();
+        Long productId = saveProduct(1000L, 9);
+        Long firstOrderId = createOrder(userId, productId, 1);
+        startPaymentWithLostResponse(userId, firstOrderId, "k1");
+        Long secondOrderId = createOrder(userId, productId, 1);
+        startPaymentWithLostResponse(userId, secondOrderId, "k2");
+        fakePaymentGateway.reset();
+        fakePaymentGateway.willOpenCircuit();
+
+        // act
+        paymentFacade.runScheduledLookups();
+
+        // assert - 첫 건만 가짜 PG 에 닿았고(차단 응답), 둘 다 조회 기록이 없다
+        assertThat(fakePaymentGateway.lookupCallCount()).isEqualTo(1);
+        for (Long orderId : List.of(firstOrderId, secondOrderId)) {
+            PaymentAttempt attempt = attemptOf(orderId);
+            assertThat(attempt.getLookupCount()).isZero();
+            assertThat(attempt.getNextLookupAt()).isNull();
+            assertThat(attempt.isManualCheckRequired()).isFalse();
+            assertThat(attempt.getStatus()).isEqualTo(PaymentAttempt.Status.UNKNOWN);
+        }
+    }
+
+    @DisplayName("일반 조회 실패(UNAVAILABLE)는 차단과 달리 건마다 실제로 물어본 것이므로, 모든 대상의 조회 횟수가 1 늘고 다음 조회 시각이 찍힌다.")
+    @Test
+    void countsEveryAttempt_whenLookupFailsNormally() {
+        // arrange - 대상 2건
+        Long userId = saveUser();
+        Long productId = saveProduct(1000L, 9);
+        Long firstOrderId = createOrder(userId, productId, 1);
+        startPaymentWithLostResponse(userId, firstOrderId, "k1");
+        Long secondOrderId = createOrder(userId, productId, 1);
+        startPaymentWithLostResponse(userId, secondOrderId, "k2");
+        fakePaymentGateway.reset();
+        fakePaymentGateway.willFailLookups();
+
+        // act
+        paymentFacade.runScheduledLookups();
+
+        // assert
+        assertThat(fakePaymentGateway.lookupCallCount()).isEqualTo(2);
+        for (Long orderId : List.of(firstOrderId, secondOrderId)) {
+            PaymentAttempt attempt = attemptOf(orderId);
+            assertThat(attempt.getLookupCount()).isEqualTo(1);
+            assertThat(attempt.getNextLookupAt().toInstant()).isEqualTo(now);
+            assertThat(attempt.getStatus()).isEqualTo(PaymentAttempt.Status.UNKNOWN);
+        }
+    }
+
     @DisplayName("스케줄러 1회 실행은 PG 를 조회하는 동안 DB 트랜잭션을 보유하지 않는다.")
     @Test
     void holdsNoTransactionWhileCallingPg() {

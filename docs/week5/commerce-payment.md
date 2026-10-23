@@ -52,7 +52,7 @@
 | 조회 불가 이유 | `PaymentLookupResult.UnavailableReason` (`CALL_FAILED` 호출 실패 / `CIRCUIT_OPEN` 서킷 차단) | **신규** (4단계. 스케줄러가 차단 주기를 세지 않기 위해 구분. 5-7 결정 ㉙ 참조) |
 | PG 조회 서킷 설정값 | `payment.pg.circuit-breaker.*` (표본 방식·크기, 최소 호출 수, 실패율, OPEN 대기, HALF_OPEN 시험 호출 수) | **신규** (4단계. `resilience4j-circuitbreaker` core 모듈을 `HttpPaymentGateway` 안에서 코드로 감싼다. 5-7 결정 ㉛·㉜ 참조) |
 | PG 포트 운영 껍데기 | `UnavailablePaymentGateway` | 1·2단계에만 있었음. 3단계-B 에서 `HttpPaymentGateway` 로 교체하며 **삭제함** (1-6 결정 ㉓) |
-| PG 실제 HTTP adapter | `HttpPaymentGateway` (infrastructure `@Component`. `RestClient` + JDK `HttpClient` 를 안에서 조립, HTTP/1.1·프록시 없음) | **신규** (3단계-B 구현. 1-6 결정 ㉑ 참조) |
+| PG 실제 HTTP adapter | `HttpPaymentGateway` (infrastructure `@Component`. `RestClient` + JDK `HttpClient` 를 안에서 조립, HTTP/1.1·프록시 없음. 생성자에 `Clock` 주입 → 4단계 서킷의 시계) | **신규** (3단계-B 구현, 4단계에서 조회 서킷 추가. 1-6 결정 ㉑, 5-7 결정 ㉗ 참조) |
 | PG adapter 설정값 | `PaymentGatewayProperties` ← `payment.pg.*` (`enabled`, `base-url`, `callback-url`, `user-id`, `connect-timeout`, `read-timeout`) | **신규** (3단계. 1-6 결정 ㉒·㉓·㉔ 참조) |
 | create 응답의 불일치 표시 | `PaymentCreateResult.conflictReason`, `unknownWithConflict(reason)` | **신규** (3단계. UNKNOWN + 충돌 사유. 1-6 결정 ⑱·㉕ 참조) |
 | 계약 테스트용 PG 서버 | `TestPaymentPgServer` (테스트 소스, JDK `HttpServer`) | **신규** (3단계. 1-6 결정 ㉖ 참조) |

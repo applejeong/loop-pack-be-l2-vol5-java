@@ -21,6 +21,7 @@ import org.springframework.web.client.RestClientException;
 import java.io.IOException;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -53,11 +54,16 @@ public class HttpPaymentGateway implements PaymentGateway {
 
     private final PaymentGatewayProperties properties;
     private final ObjectMapper objectMapper;
+    private final Clock clock;
     private final RestClient restClient;
 
-    public HttpPaymentGateway(PaymentGatewayProperties properties, ObjectMapper objectMapper) {
+    /**
+     * clock 은 4단계 서킷브레이커의 시계다 (설계 5-7 결정 ㉗~㉜). 운영은 Clock 빈, 계약 테스트는 앞당길 수 있는 시계를 넣는다.
+     */
+    public HttpPaymentGateway(PaymentGatewayProperties properties, ObjectMapper objectMapper, Clock clock) {
         this.properties = properties;
         this.objectMapper = objectMapper;
+        this.clock = clock;
 
         HttpClient httpClient = HttpClient.newBuilder()
             .version(HttpClient.Version.HTTP_1_1)
@@ -106,15 +112,15 @@ public class HttpPaymentGateway implements PaymentGateway {
                 .uri(uriBuilder -> uriBuilder.path(PAYMENTS_PATH).queryParam("orderId", providerOrderId).build())
                 .exchange(HttpPaymentGateway::readRaw);
         } catch (RestClientException e) {
-            return PaymentLookupResult.unavailable();
+            return PaymentLookupResult.unavailable(PaymentLookupResult.UnavailableReason.CALL_FAILED);
         }
         if (response.status() != OK) {
-            return PaymentLookupResult.unavailable();
+            return PaymentLookupResult.unavailable(PaymentLookupResult.UnavailableReason.CALL_FAILED);
         }
         try {
             JsonNode body = objectMapper.readTree(response.body());
             if (!body.isArray()) {
-                return PaymentLookupResult.unavailable();
+                return PaymentLookupResult.unavailable(PaymentLookupResult.UnavailableReason.CALL_FAILED);
             }
             List<PaymentTransaction> transactions = new ArrayList<>();
             for (JsonNode node : body) {
@@ -122,7 +128,7 @@ public class HttpPaymentGateway implements PaymentGateway {
             }
             return PaymentLookupResult.found(transactions);
         } catch (IOException | IllegalArgumentException e) {
-            return PaymentLookupResult.unavailable();
+            return PaymentLookupResult.unavailable(PaymentLookupResult.UnavailableReason.CALL_FAILED);
         }
     }
 
@@ -138,18 +144,18 @@ public class HttpPaymentGateway implements PaymentGateway {
                 .uri(PAYMENTS_PATH + "/{transactionKey}", transactionKey)
                 .exchange(HttpPaymentGateway::readRaw);
         } catch (RestClientException e) {
-            return PaymentLookupResult.unavailable();
+            return PaymentLookupResult.unavailable(PaymentLookupResult.UnavailableReason.CALL_FAILED);
         }
         if (response.status() == NOT_FOUND) {
             return PaymentLookupResult.found(List.of());
         }
         if (response.status() != OK) {
-            return PaymentLookupResult.unavailable();
+            return PaymentLookupResult.unavailable(PaymentLookupResult.UnavailableReason.CALL_FAILED);
         }
         try {
             return PaymentLookupResult.found(List.of(toTransaction(objectMapper.readTree(response.body()))));
         } catch (IOException | IllegalArgumentException e) {
-            return PaymentLookupResult.unavailable();
+            return PaymentLookupResult.unavailable(PaymentLookupResult.UnavailableReason.CALL_FAILED);
         }
     }
 

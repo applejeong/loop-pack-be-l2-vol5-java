@@ -22,9 +22,14 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.ServerSocket;
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -46,10 +51,17 @@ class HttpPaymentGatewayContractTest {
     private static final String REJECTED_CODE = "TEST_PG_REJECTED_BEFORE_CREATE";
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(1);
     private static final Duration READ_TIMEOUT = Duration.ofMillis(500);
+    /**
+     * 서킷 테스트 설정 (설계 5-7 결정 ㉜ "테스트 설정은 작게"). 최근 4회 중 4회가 모이면 판정, 실패율 50% 이상이면 OPEN, 10초 뒤 시험 2회.
+     */
+    private static final Duration WAIT_IN_OPEN = Duration.ofSeconds(10);
+    private static final PaymentGatewayProperties.CircuitBreaker CIRCUIT =
+        new PaymentGatewayProperties.CircuitBreaker("COUNT_BASED", 4, 4, 50f, WAIT_IN_OPEN, 2);
 
     private static TestPaymentPgServer server;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final MutableClock clock = new MutableClock(Instant.parse("2026-01-01T00:00:00Z"));
     private HttpPaymentGateway gateway;
 
     @BeforeAll
@@ -374,6 +386,184 @@ class HttpPaymentGatewayContractTest {
         }
     }
 
+    @DisplayName("조회 서킷브레이커는 (설계 5-7), ")
+    @Nested
+    class CircuitBreakerOnLookups {
+        @DisplayName("최소 호출 수(4) 미만에서는 실패해도 요청이 서버에 가고, 4회 중 3회 실패(75%)가 되면 열려 다음 조회는 CIRCUIT_OPEN 이고 서버에 가지 않는다.")
+        @Test
+        void opens_whenFailureRateExceedsThresholdAfterMinimumCalls() {
+            // arrange & act - 실패·실패·성공 (3회, 최소 호출 수 미달)
+            failLookups();
+            PaymentLookupResult first = gateway.findAllByOrderId(ORDER_ID);
+            gateway.findAllByOrderId(ORDER_ID);
+            serveEmptyList();
+            PaymentLookupResult third = gateway.findAllByOrderId(ORDER_ID);
+
+            // assert - 아직 전부 서버에 갔다
+            assertThat(first.reason()).isEqualTo(PaymentLookupResult.UnavailableReason.CALL_FAILED);
+            assertThat(third.outcome()).isEqualTo(PaymentLookupResult.Outcome.FOUND);
+            assertThat(lookupsReceived()).isEqualTo(3);
+
+            // act - 4회째 실패로 4회 중 3회 실패
+            failLookups();
+            gateway.findAllByOrderId(ORDER_ID);
+            PaymentLookupResult blocked = gateway.findAllByOrderId(ORDER_ID);
+
+            // assert
+            assertThat(lookupsReceived()).isEqualTo(4);
+            assertThat(blocked.isUnavailable()).isTrue();
+            assertThat(blocked.reason()).isEqualTo(PaymentLookupResult.UnavailableReason.CIRCUIT_OPEN);
+            assertThat(blocked.isCircuitOpen()).isTrue();
+        }
+
+        @DisplayName("OPEN 동안은 조회마다 CIRCUIT_OPEN 을 돌려주고 서버가 받은 조회 요청 수는 늘지 않는다.")
+        @Test
+        void returnsCircuitOpenWithoutCalling_whileOpen() {
+            // arrange
+            openCircuit();
+
+            // act
+            PaymentLookupResult a = gateway.findAllByOrderId(ORDER_ID);
+            PaymentLookupResult b = gateway.findAllByOrderId(ORDER_ID);
+            PaymentLookupResult c = gateway.findAllByOrderId(ORDER_ID);
+
+            // assert
+            assertThat(List.of(a, b, c)).allMatch(PaymentLookupResult::isCircuitOpen);
+            assertThat(lookupsReceived()).isEqualTo(4);
+        }
+
+        @DisplayName("OPEN 대기 시간(10초)이 지나면 HALF_OPEN 이 되어 시험 호출이 서버에 간다.")
+        @Test
+        void allowsTrialCall_afterWaitDurationInOpenState() {
+            // arrange
+            openCircuit();
+            serveEmptyList();
+
+            // act
+            clock.advance(WAIT_IN_OPEN.plusSeconds(1));
+            PaymentLookupResult trial = gateway.findAllByOrderId(ORDER_ID);
+
+            // assert
+            assertThat(trial.outcome()).isEqualTo(PaymentLookupResult.Outcome.FOUND);
+            assertThat(lookupsReceived()).isEqualTo(5);
+        }
+
+        @DisplayName("HALF_OPEN 의 시험 호출 2회가 성공하면 CLOSED 가 되어 그 다음 조회도 서버에 간다.")
+        @Test
+        void closes_whenTrialCallsSucceed() {
+            // arrange
+            openCircuit();
+            serveEmptyList();
+            clock.advance(WAIT_IN_OPEN.plusSeconds(1));
+
+            // act
+            gateway.findAllByOrderId(ORDER_ID);
+            gateway.findAllByOrderId(ORDER_ID);
+            PaymentLookupResult afterTrials = gateway.findAllByOrderId(ORDER_ID);
+
+            // assert - HALF_OPEN 이었다면 세 번째는 거부됐을 호출이다
+            assertThat(afterTrials.outcome()).isEqualTo(PaymentLookupResult.Outcome.FOUND);
+            assertThat(lookupsReceived()).isEqualTo(7);
+        }
+
+        @DisplayName("HALF_OPEN 의 시험 호출이 실패하면 다시 OPEN 이 되어 다음 조회는 CIRCUIT_OPEN 이다.")
+        @Test
+        void reopens_whenTrialCallsFail() {
+            // arrange - 서버는 계속 503
+            openCircuit();
+            clock.advance(WAIT_IN_OPEN.plusSeconds(1));
+
+            // act
+            PaymentLookupResult trial1 = gateway.findAllByOrderId(ORDER_ID);
+            PaymentLookupResult trial2 = gateway.findAllByOrderId(ORDER_ID);
+            PaymentLookupResult blocked = gateway.findAllByOrderId(ORDER_ID);
+
+            // assert
+            assertThat(trial1.reason()).isEqualTo(PaymentLookupResult.UnavailableReason.CALL_FAILED);
+            assertThat(trial2.reason()).isEqualTo(PaymentLookupResult.UnavailableReason.CALL_FAILED);
+            assertThat(blocked.isCircuitOpen()).isTrue();
+            assertThat(lookupsReceived()).isEqualTo(6);
+        }
+
+        @DisplayName("빈 목록과 단건 404 는 실패로 세지 않아, 번갈아 8회 반복해도 열리지 않고 전부 서버에 간다.")
+        @Test
+        void doesNotCountEmptyListOrNotFoundAsFailure() {
+            // act
+            for (int i = 0; i < 4; i++) {
+                assertThat(gateway.findAllByOrderId(ORDER_ID).outcome()).isEqualTo(PaymentLookupResult.Outcome.FOUND);
+                assertThat(gateway.findByTransactionKey("TEST-TX-NONE").outcome()).isEqualTo(PaymentLookupResult.Outcome.FOUND);
+            }
+
+            // assert
+            assertThat(lookupsReceived()).isEqualTo(8);
+        }
+
+        @DisplayName("읽기 timeout 도 실패로 세어, 4회 연속 timeout 뒤의 조회는 즉시 CIRCUIT_OPEN 이다.")
+        @Test
+        void countsReadTimeoutAsFailure() {
+            // arrange
+            server.holdResponses();
+
+            // act
+            for (int i = 0; i < 4; i++) {
+                assertThat(gateway.findAllByOrderId(ORDER_ID).reason()).isEqualTo(PaymentLookupResult.UnavailableReason.CALL_FAILED);
+            }
+            PaymentLookupResult blocked = gateway.findAllByOrderId(ORDER_ID);
+
+            // assert
+            assertThat(blocked.isCircuitOpen()).isTrue();
+        }
+
+        @DisplayName("서킷이 OPEN 이어도 create 는 영향 없이 서버에 1회 나가고 응답대로 ACCEPTED 다.")
+        @Test
+        void doesNotAffectCreate_whileOpen() {
+            // arrange
+            openCircuit();
+            server.respondToCreate(202, transactionJson(TRANSACTION_KEY, ORDER_ID, AMOUNT, "PENDING"));
+
+            // act
+            PaymentCreateResult result = gateway.create(command());
+
+            // assert
+            assertThat(result.outcome()).isEqualTo(PaymentCreateResult.Outcome.ACCEPTED);
+            assertThat(server.createCount()).isEqualTo(1);
+        }
+
+        @DisplayName("목록 조회 실패로 열린 서킷은 단건 조회도 막는다 (같은 서킷 하나).")
+        @Test
+        void sharesOneCircuit_betweenListAndSingleLookup() {
+            // arrange
+            openCircuit();
+
+            // act
+            PaymentLookupResult single = gateway.findByTransactionKey(TRANSACTION_KEY);
+
+            // assert
+            assertThat(single.isCircuitOpen()).isTrue();
+            assertThat(lookupsReceived()).isEqualTo(4);
+        }
+
+        /**
+         * 503 을 4회 받아 서킷을 열고, 다음 조회가 차단되는 것까지 확인한다. 서버가 받은 조회는 4회다.
+         */
+        private void openCircuit() {
+            failLookups();
+            for (int i = 0; i < 4; i++) {
+                gateway.findAllByOrderId(ORDER_ID);
+            }
+            assertThat(gateway.findAllByOrderId(ORDER_ID).isCircuitOpen()).as("4회 실패 뒤 서킷이 열려야 한다").isTrue();
+            assertThat(lookupsReceived()).isEqualTo(4);
+        }
+
+        private void failLookups() {
+            server.respondToList(ORDER_ID, 503, null);
+        }
+
+        private void serveEmptyList() {
+            server.respondToList(ORDER_ID, 200, "[]");
+        }
+    }
+
     @DisplayName("공통으로, ")
     @Nested
     class Common {
@@ -428,7 +618,43 @@ class HttpPaymentGatewayContractTest {
 
     private HttpPaymentGateway gatewayFor(String baseUrl, boolean enabled) {
         return new HttpPaymentGateway(
-            new PaymentGatewayProperties(enabled, baseUrl, CALLBACK_URL, USER_ID, CONNECT_TIMEOUT, READ_TIMEOUT), objectMapper);
+            new PaymentGatewayProperties(enabled, baseUrl, CALLBACK_URL, USER_ID, CONNECT_TIMEOUT, READ_TIMEOUT, CIRCUIT),
+            objectMapper,
+            clock);
+    }
+
+    private static long lookupsReceived() {
+        return server.receivedRequests().stream().filter(request -> "GET".equals(request.method())).count();
+    }
+
+    /**
+     * 앞당길 수 있는 시계. 서킷의 OPEN 대기 판정이 이 시계를 읽으므로 sleep 없이 시간을 진행한다.
+     */
+    private static final class MutableClock extends Clock {
+        private final AtomicReference<Instant> now;
+
+        private MutableClock(Instant start) {
+            this.now = new AtomicReference<>(start);
+        }
+
+        private void advance(Duration duration) {
+            now.updateAndGet(current -> current.plus(duration));
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return now.get();
+        }
     }
 
     private static PaymentCreateCommand command() {

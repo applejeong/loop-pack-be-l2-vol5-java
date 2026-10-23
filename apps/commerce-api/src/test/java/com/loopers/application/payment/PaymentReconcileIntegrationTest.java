@@ -287,11 +287,67 @@ class PaymentReconcileIntegrationTest {
             assertThat(attemptOf(orderId).getTransactionKey()).isEqualTo(attempt.getTransactionKey());
             assertThat(attemptOf(orderId).isConflicted()).isFalse();
         }
+
+        @DisplayName("서킷이 차단 중이면, 조회 실패와 같이 lookupUnavailable=true 와 저장 상태를 돌려주고 시도·주문·예약·재고는 불변이며 충돌도 기록하지 않는다 (설계 5-7 결정 ㉙).")
+        @Test
+        void returnsUnavailable_andKeepsEverything_whenCircuitIsOpen() {
+            // arrange
+            Long userId = saveUser();
+            Long productId = saveProduct(1000L, 5);
+            Long orderId = createOrder(userId, productId, 2);
+            PaymentAttempt attempt = startPayment(userId, orderId, "k1");
+            fakePaymentGateway.markSuccess(attempt.getTransactionKey());
+            fakePaymentGateway.willOpenCircuit();
+
+            // act
+            OrderConfirmInfo info = paymentFacade.reconcile(userId, orderId);
+
+            // assert
+            assertThat(info.settled()).isFalse();
+            assertThat(info.attemptStatus()).isEqualTo("PENDING");
+            assertThat(info.lookupUnavailable()).isTrue();
+            assertUnchanged(orderId, productId, PaymentAttempt.Status.PENDING);
+            assertThat(attemptOf(orderId).isConflicted()).isFalse();
+            assertThat(fakePaymentGateway.lookupCallCount()).isEqualTo(1);
+        }
     }
 
     @DisplayName("종결·복구·재시작 장면에서, ")
     @Nested
     class Recovery {
+        @DisplayName("서킷 차단이 풀리면, 다음 reconcile 이 같은 외부 결과를 조회해 반영하고 create 는 추가 0회다.")
+        @Test
+        void appliesResult_afterCircuitRecovers() {
+            // arrange
+            Long userId = saveUser();
+            Long productId = saveProduct(1000L, 5);
+            Long orderId = createOrder(userId, productId, 2);
+            PaymentAttempt attempt = startPayment(userId, orderId, "k1");
+            fakePaymentGateway.markSuccess(attempt.getTransactionKey());
+            fakePaymentGateway.willOpenCircuit();
+
+            // act 1 - 차단 중
+            OrderConfirmInfo blocked = paymentFacade.reconcile(userId, orderId);
+
+            // assert 1
+            assertThat(blocked.lookupUnavailable()).isTrue();
+            assertUnchanged(orderId, productId, PaymentAttempt.Status.PENDING);
+
+            // act 2 - 회복 뒤
+            fakePaymentGateway.willServeLookups();
+            OrderConfirmInfo recovered = paymentFacade.reconcile(userId, orderId);
+
+            // assert 2
+            assertThat(recovered.settled()).isTrue();
+            assertThat(recovered.attemptStatus()).isEqualTo("SUCCESS");
+            assertThat(recovered.lookupUnavailable()).isFalse();
+            assertThat(orderOf(orderId).getStatus()).isEqualTo(Order.OrderStatus.CONFIRMED);
+            assertThat(reservationStatusesOf(orderId)).containsExactly(StockReservation.Status.CONSUMED);
+            assertThat(stockOf(productId)).isEqualTo(3);
+            assertThat(fakePaymentGateway.createCount()).isEqualTo(1);
+            assertThat(fakePaymentGateway.lookupCallCount()).isEqualTo(2);
+        }
+
         @DisplayName("이미 종결된 시도면, PG 조회 0회로 저장 결과(settled=true)를 돌려준다.")
         @Test
         void returnsStoredResultWithoutLookup_whenAlreadySettled() {
