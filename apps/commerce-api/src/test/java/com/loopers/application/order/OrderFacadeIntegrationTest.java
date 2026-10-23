@@ -81,7 +81,8 @@ class OrderFacadeIntegrationTest {
             productJpaRepository.save(first);
 
             // act
-            OrderInfo result = orderFacade.confirmOrder(userId, orderId);
+            OrderInfo result = orderFacade.confirmOrder(userId, orderId,
+                new OrderCommand.Confirm("k-" + orderId, "TEST", "0000-0000-0000-0000")).order();
 
             // assert - 응답과 새로 조회한 DB 상태가 모두 확정 결과를 반영한다
             assertThat(result.status()).isEqualTo("CONFIRMED");
@@ -126,7 +127,8 @@ class OrderFacadeIntegrationTest {
             );
 
             // act - 실패 원인이 주입한 CHECK 제약인지까지 확인한다
-            assertThatThrownBy(() -> orderFacade.confirmOrder(userId, orderId))
+            assertThatThrownBy(() -> orderFacade.confirmOrder(userId, orderId,
+                new OrderCommand.Confirm("k-" + orderId, "TEST", "0000-0000-0000-0000")))
                 .rootCause().hasMessageContaining(FAIL_CONSTRAINT);
 
             // assert - 새 트랜잭션에서 재조회해 DB 상태를 확인한다

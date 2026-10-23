@@ -36,6 +36,8 @@ import static org.mockito.Mockito.verify;
 @ExtendWith(MockitoExtension.class)
 class OrderFacadeTest {
 
+    private static final OrderCommand.Confirm CONFIRM = new OrderCommand.Confirm("k-100", "TEST", "0000-0000-0000-0000");
+
     @Mock
     private UserRepository userRepository;
 
@@ -162,7 +164,7 @@ class OrderFacadeTest {
             given(orderService.confirmOrder(order)).willReturn(confirmed);
 
             // act
-            OrderInfo result = orderFacade.confirmOrder(1L, 100L);
+            OrderInfo result = orderFacade.confirmOrder(1L, 100L, CONFIRM).order();
 
             // assert - 응답은 UPDATE 뒤 다시 읽은 주문이다
             assertThat(result.status()).isEqualTo("CONFIRMED");
@@ -188,7 +190,7 @@ class OrderFacadeTest {
             given(orderService.confirmOrder(order)).willReturn(order);
 
             // act
-            orderFacade.confirmOrder(1L, 100L);
+            orderFacade.confirmOrder(1L, 100L, CONFIRM);
 
             // assert
             verify(productService).deductStock(10L, 5);
@@ -204,7 +206,7 @@ class OrderFacadeTest {
 
             // act
             CoreException result = assertThrows(CoreException.class, () -> {
-                orderFacade.confirmOrder(9L, 100L);
+                orderFacade.confirmOrder(9L, 100L, CONFIRM);
             });
 
             // assert
@@ -227,7 +229,7 @@ class OrderFacadeTest {
 
             // act
             CoreException result = assertThrows(CoreException.class, () -> {
-                orderFacade.confirmOrder(1L, 100L);
+                orderFacade.confirmOrder(1L, 100L, CONFIRM);
             });
 
             // assert
@@ -251,7 +253,7 @@ class OrderFacadeTest {
 
             // act
             CoreException result = assertThrows(CoreException.class, () -> {
-                orderFacade.confirmOrder(1L, 100L);
+                orderFacade.confirmOrder(1L, 100L, CONFIRM);
             });
 
             // assert
@@ -271,7 +273,7 @@ class OrderFacadeTest {
 
             // act
             CoreException result = assertThrows(CoreException.class, () -> {
-                orderFacade.confirmOrder(1L, 100L);
+                orderFacade.confirmOrder(1L, 100L, CONFIRM);
             });
 
             // assert

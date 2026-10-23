@@ -3,7 +3,6 @@ package com.loopers.application.order;
 import com.loopers.domain.order.Order;
 import com.loopers.domain.order.OrderItem;
 import com.loopers.domain.order.OrderService;
-import com.loopers.domain.point.PointService;
 import com.loopers.domain.product.Product;
 import com.loopers.domain.product.ProductService;
 import com.loopers.domain.user.UserRepository;
@@ -13,7 +12,6 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.Comparator;
 import java.util.List;
 
 @RequiredArgsConstructor
@@ -22,7 +20,6 @@ public class OrderFacade {
 
     private final UserRepository userRepository;
     private final ProductService productService;
-    private final PointService pointService;
     private final OrderService orderService;
 
     /**
@@ -40,21 +37,16 @@ public class OrderFacade {
     }
 
     /**
-     * 주문 확정 → 포인트 차감 → 상품 ID 오름차순 재고 차감 순서로 조건부 UPDATE 한다.
-     * 어느 단계든 영향 행이 0 이면 CoreException 으로 전체가 롤백되어 주문은 DRAFT 로 남는다.
-     * 응답은 갱신 뒤 다시 읽은 주문으로 만든다.
+     * 주문 확정 = PG 결제 시작. 포인트는 차감하지 않는다.
+     * 이 메서드는 트랜잭션을 갖지 않는다. PG 호출 동안 DB 트랜잭션·락을 보유하지 않기 위해 세 구간으로 나눈다 (설계 1장, 6장).
+     * 사용자 식별(401) → 합성 카드 입력 검사(400) → TX A(PaymentStartService.start)
+     * → STARTED 면 TX 밖에서 PG create 1회 → 관찰 결과를 TX B(PaymentResultService)에 전달
+     *   (ACCEPTED → recordPending, UNKNOWN → recordUnknown, REJECTED_NO_EFFECT → applyFinal FAILED/REJECTED_BEFORE_CREATE)
+     * → EXISTING 이면 PG 호출 없이 저장된 상태만 반환
+     * → 읽기 트랜잭션 안에서 주문·시도를 다시 읽어 응답을 만든다.
      */
-    @Transactional
-    public OrderInfo confirmOrder(Long requesterId, Long orderId) {
-        Order order = findOwnOrder(requesterId, orderId);
-
-        Order confirmed = orderService.confirmOrder(order);
-        pointService.deduct(requesterId, order.getTotalAmount());
-        order.getItems().stream()
-            .sorted(Comparator.comparing(OrderItem::getProductId))
-            .forEach(item -> productService.deductStock(item.getProductId(), item.getQuantity()));
-
-        return OrderInfo.from(confirmed);
+    public OrderConfirmInfo confirmOrder(Long requesterId, Long orderId, OrderCommand.Confirm command) {
+        throw new UnsupportedOperationException("1단계 미구현");
     }
 
     @Transactional(readOnly = true)

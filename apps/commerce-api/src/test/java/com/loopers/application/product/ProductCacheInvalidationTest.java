@@ -266,7 +266,8 @@ class ProductCacheInvalidationTest {
             fillCache();
 
             // act
-            orderFacade.confirmOrder(userId, orderId);
+            orderFacade.confirmOrder(userId, orderId,
+                new OrderCommand.Confirm("k-" + orderId, "TEST", "0000-0000-0000-0000"));
             boolean keyExistsAfterWrite = cacheRedisTemplate.hasKey(CACHE_KEY);
             List<ProductInfo> result = queryFixturePage();
 
@@ -287,7 +288,8 @@ class ProductCacheInvalidationTest {
             point.charge(10_000L);
             pointJpaRepository.save(point);
             Long orderId = orderFacade.createOrder(userId, List.of(new OrderCommand.Item(FIRST_PRODUCT_ID, 2))).orderId();
-            return orderFacade.confirmOrder(userId, orderId);
+            return orderFacade.confirmOrder(userId, orderId,
+                new OrderCommand.Confirm("k-" + orderId, "TEST", "0000-0000-0000-0000")).order();
         }
 
         @DisplayName("주문 확정 뒤 그 상품의 가격을 수정해도, 기존 주문의 단가·결제액은 변경 전 가격 그대로다.")

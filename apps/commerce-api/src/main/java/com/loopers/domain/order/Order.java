@@ -22,14 +22,28 @@ import java.util.Map;
 @Table(name = "orders")
 public class Order extends BaseEntity {
 
+    /**
+     * DRAFT → PAYMENT_PENDING (TX A) → CONFIRMED / PAYMENT_FAILED (TX B). CONFIRMED·PAYMENT_FAILED 는 종결이다.
+     */
     public enum OrderStatus {
-        DRAFT, CONFIRMED
+        DRAFT, PAYMENT_PENDING, CONFIRMED, PAYMENT_FAILED
+    }
+
+    /**
+     * 무엇으로 결제했는가. 상태(어디까지 진행됐는가)와 다른 축이다.
+     * 교체 전 POINT 로 확정한 주문은 POINT, PG 결제를 시작한 주문은 PG, 아직 결제하지 않은 DRAFT 는 null 이다.
+     */
+    public enum PaymentMethod {
+        POINT, PG
     }
 
     private Long userId;
 
     @Enumerated(EnumType.STRING)
     private OrderStatus status;
+
+    @Enumerated(EnumType.STRING)
+    private PaymentMethod paymentMethod;
 
     @OneToMany(cascade = CascadeType.ALL, orphanRemoval = true)
     @JoinColumn(name = "order_id")

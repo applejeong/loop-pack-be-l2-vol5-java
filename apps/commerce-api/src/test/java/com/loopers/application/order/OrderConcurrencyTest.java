@@ -242,7 +242,8 @@ class OrderConcurrencyTest {
     }
 
     private Callable<Long> confirmTask(Long userId, Long orderId) {
-        return () -> orderFacade.confirmOrder(userId, orderId).paidAmount();
+        return () -> orderFacade.confirmOrder(userId, orderId,
+            new OrderCommand.Confirm("k-" + orderId, "TEST", "0000-0000-0000-0000")).order().paidAmount();
     }
 
     private Callable<Long> chargeTask(Long userId, long amount) {

@@ -284,7 +284,8 @@ class ProductCacheFailureTest {
 
             // act
             OrderInfo order = orderFacade.createOrder(userId, List.of(new OrderCommand.Item(FIRST_PRODUCT_ID, 2)));
-            OrderInfo confirmed = orderFacade.confirmOrder(userId, order.orderId());
+            OrderInfo confirmed = orderFacade.confirmOrder(userId, order.orderId(),
+                new OrderCommand.Confirm("k-" + order.orderId(), "TEST", "0000-0000-0000-0000")).order();
             List<ProductInfo> result = queryFixturePage();
 
             // assert

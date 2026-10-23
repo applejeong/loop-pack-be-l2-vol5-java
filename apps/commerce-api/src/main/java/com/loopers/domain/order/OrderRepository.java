@@ -27,4 +27,17 @@ public interface OrderRepository {
      * 조건부 UPDATE 뒤 영속성 컨텍스트의 주문을 DB 상태로 다시 읽는다. 컨텍스트 전체를 비우지 않는다.
      */
     Order reload(Order order);
+
+    /**
+     * TX A ①. 주문 행을 비관적 락(SELECT … FOR UPDATE)으로 읽는다.
+     * 소유권 → 기존 시도 → DRAFT 순 판정을 한 WHERE 로 정할 수 없어 잠근 뒤 최신 커밋 값을 읽는다.
+     */
+    Optional<Order> findByIdForUpdate(Long orderId);
+
+    /**
+     * TX B ⑦. WHERE status = 'PAYMENT_PENDING' 일 때만 CONFIRMED(+paidAmount) 또는 PAYMENT_FAILED 로 바꾼다.
+     *
+     * @return 갱신된 행 수. 0 이면 이미 종결된 주문이다.
+     */
+    int finishIfPaymentPending(Long orderId, Order.OrderStatus status, long paidAmount);
 }

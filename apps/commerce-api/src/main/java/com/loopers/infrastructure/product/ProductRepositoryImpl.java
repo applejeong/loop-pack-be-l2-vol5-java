@@ -114,6 +114,11 @@ public class ProductRepositoryImpl implements ProductRepository {
             .execute();
     }
 
+    @Override
+    public int restoreStock(Long productId, int quantity) {
+        throw new UnsupportedOperationException("1단계 미구현");
+    }
+
     private BooleanExpression brandIdEq(Long brandId) {
         return brandId == null ? null : product.brandId.eq(brandId);
     }

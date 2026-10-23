@@ -68,6 +68,16 @@ public class OrderRepositoryImpl implements OrderRepository {
         return target;
     }
 
+    @Override
+    public Optional<Order> findByIdForUpdate(Long orderId) {
+        throw new UnsupportedOperationException("1단계 미구현");
+    }
+
+    @Override
+    public int finishIfPaymentPending(Long orderId, Order.OrderStatus status, long paidAmount) {
+        throw new UnsupportedOperationException("1단계 미구현");
+    }
+
     private BooleanExpression userIdEq(Long userId) {
         return userId == null ? null : order.userId.eq(userId);
     }
