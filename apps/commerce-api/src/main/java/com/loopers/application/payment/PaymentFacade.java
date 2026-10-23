@@ -46,7 +46,7 @@ public class PaymentFacade {
      * POST /api/v1/payments/callback (설계 7-5 결정 ⑲·⑬).
      * 시도 없음 → NOT_FOUND. 종결 → 조회 없이 저장 결과. 그 외 목록 조회 후 반영.
      * 본문의 status 는 신뢰하지 않으므로 받지 않는다. transactionKey 는 목록의 거래와 대조하는 데만 쓴다.
-     * 조회 실패 → INTERNAL_ERROR(5xx), 상태 불변. 충돌(0건 포함) → CONFLICT(409) + 충돌 기록.
+     * 조회 실패·서킷 차단 → INTERNAL_ERROR(5xx), 상태 불변. 충돌(0건 포함) → CONFLICT(409) + 충돌 기록.
      */
     public OrderConfirmInfo applyCallback(String providerOrderId, String transactionKey) {
         PaymentAttempt attempt = paymentAttemptRepository.findByProviderOrderId(providerOrderId)
@@ -71,7 +71,7 @@ public class PaymentFacade {
     /**
      * POST /api/v1/orders/{orderId}/payment/reconcile (설계 5-6 결정 ⑳).
      * 사용자 식별 → 소유권 → 시도 없음(NOT_FOUND) → 종결이면 조회 없이 저장 결과 → 목록 조회 후 반영.
-     * 조회 실패·충돌은 예외가 아니라 lookupUnavailable=true 로 돌려준다. 조회 횟수(lookupCount)는 세지 않는다.
+     * 조회 실패·서킷 차단·충돌은 예외가 아니라 lookupUnavailable=true 로 돌려준다. 조회 횟수(lookupCount)는 세지 않는다.
      */
     public OrderConfirmInfo reconcile(Long requesterId, Long orderId) {
         requireIdentifiedUser(requesterId);
@@ -82,7 +82,7 @@ public class PaymentFacade {
         PaymentAttempt attempt = paymentAttemptRepository.findByOrderId(orderId)
             .orElseThrow(() -> new CoreException(ErrorType.NOT_FOUND, "[orderId = " + orderId + "] 결제 시도를 찾을 수 없습니다."));
 
-        boolean lookupUnavailable = !attempt.getStatus().isTerminal() && !lookUp(attempt);
+        boolean lookupUnavailable = !attempt.getStatus().isTerminal() && lookUp(attempt) != LookupOutcome.APPLIED;
         return toInfo(orderId, lookupUnavailable);
     }
 
@@ -90,6 +90,7 @@ public class PaymentFacade {
      * 스케줄러 1회 실행 (설계 5-3 결정 ⑫). 미종결 + 최소 경과 시간이 지난 시도만 골라 건별로 조회·반영·조회 기록을 하고,
      * 한 건의 예외는 잡아 다음 건으로 넘어간다. @Transactional 을 걸지 않는다.
      * 조회 실패도, 예상 못 한 예외도 실제로 물어본 것이므로 lookupCount 를 1 올리고 nextLookupAt 을 갱신한다.
+     * 서킷 차단(CIRCUIT_OPEN)은 물어보지 못한 것이므로 세지 않고, 같은 서킷을 쓰는 나머지도 막혀 있으므로 이번 주기를 끝낸다 (설계 5-7 결정 ㉙).
      */
     public void runScheduledLookups() {
         ZonedDateTime now = ZonedDateTime.now(clock);
@@ -98,21 +99,37 @@ public class PaymentFacade {
 
         for (PaymentAttempt attempt : dueAttempts) {
             try {
-                lookUpScheduled(attempt, now);
+                if (lookUpScheduled(attempt, now) == LookupOutcome.CIRCUIT_OPEN) {
+                    log.info("PG 조회 서킷이 열려 있어 이번 주기를 중단한다. 남은 대상은 다음 주기에 조회한다.");
+                    return;
+                }
             } catch (RuntimeException e) {
                 log.warn("[attemptId = {}] 스케줄러 조회 중 예외가 났다. 다음 건을 계속한다.", attempt.getId(), e);
             }
         }
     }
 
-    private void lookUpScheduled(PaymentAttempt attempt, ZonedDateTime now) {
+    /**
+     * 조회 뒤 조회 기록을 남긴다. 예외가 나도 기록한다. 서킷 차단만 기록하지 않는다.
+     */
+    private LookupOutcome lookUpScheduled(PaymentAttempt attempt, ZonedDateTime now) {
+        LookupOutcome outcome;
         try {
-            lookUp(attempt);
-        } finally {
-            int lookupCount = attempt.getLookupCount() + 1;
-            paymentResultService.recordLookup(
-                attempt.getId(), now.plus(intervalAfter(lookupCount)), lookupCount >= lookupProperties.maxLookups());
+            outcome = lookUp(attempt);
+        } catch (RuntimeException e) {
+            recordScheduledLookup(attempt, now);
+            throw e;
         }
+        if (outcome != LookupOutcome.CIRCUIT_OPEN) {
+            recordScheduledLookup(attempt, now);
+        }
+        return outcome;
+    }
+
+    private void recordScheduledLookup(PaymentAttempt attempt, ZonedDateTime now) {
+        int lookupCount = attempt.getLookupCount() + 1;
+        paymentResultService.recordLookup(
+            attempt.getId(), now.plus(intervalAfter(lookupCount)), lookupCount >= lookupProperties.maxLookups());
     }
 
     /**
@@ -128,16 +145,25 @@ public class PaymentFacade {
     }
 
     /**
-     * 미종결 시도 1건을 PG 목록으로 확인해 반영한다. reconcile 과 스케줄러가 공유한다.
-     *
-     * @return 조회가 되고 충돌이 없으면 true. 조회 실패·충돌이면 false (reconcile 의 lookupUnavailable). 0건은 단순 미확인이라 true 다.
+     * 조회 1건의 결과. APPLIED 는 조회가 되고 충돌이 없는 경우(0건·PENDING 전이·종결 반영 포함)다.
+     * reconcile 은 APPLIED 가 아니면 lookupUnavailable=true 로 돌려주고, 스케줄러는 CIRCUIT_OPEN 이면 세지 않고 주기를 끝낸다.
      */
-    private boolean lookUp(PaymentAttempt attempt) {
+    private enum LookupOutcome {
+        APPLIED, CONFLICT, UNAVAILABLE, CIRCUIT_OPEN
+    }
+
+    /**
+     * 미종결 시도 1건을 PG 목록으로 확인해 반영한다. reconcile 과 스케줄러가 공유한다. 서킷 라이브러리는 모르고 결과 타입만 본다.
+     */
+    private LookupOutcome lookUp(PaymentAttempt attempt) {
         PaymentLookupResult lookup = paymentGateway.findAllByOrderId(attempt.getProviderOrderId());
-        if (lookup.isUnavailable()) {
-            return false;
+        if (lookup.isCircuitOpen()) {
+            return LookupOutcome.CIRCUIT_OPEN;
         }
-        return applyLookup(attempt, lookup.transactions(), null).isEmpty();
+        if (lookup.isUnavailable()) {
+            return LookupOutcome.UNAVAILABLE;
+        }
+        return applyLookup(attempt, lookup.transactions(), null).isPresent() ? LookupOutcome.CONFLICT : LookupOutcome.APPLIED;
     }
 
     /**

@@ -9,6 +9,9 @@ import com.loopers.domain.payment.PaymentCreateResult;
 import com.loopers.domain.payment.PaymentGateway;
 import com.loopers.domain.payment.PaymentLookupResult;
 import com.loopers.domain.payment.PaymentTransaction;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import org.springframework.http.HttpRequest;
 import org.springframework.http.MediaType;
 import org.springframework.http.StreamingHttpOutputMessage;
@@ -24,6 +27,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Supplier;
 
 /**
  * 로컬 테스트 PG 의 실제 HTTP adapter (설계 1-6 결정 ㉑~㉖, 7-3).
@@ -33,8 +37,10 @@ import java.util.List;
  * 응답은 상태 코드와 본문 문자열로 받아 트리로 해석한다. transactionCreated 가 진짜 boolean 인지 보기 위해서다.
  * create: 202 + PENDING → ACCEPTED, 422 + 정확한 code + boolean false + orderId·amount 일치 → REJECTED_NO_EFFECT,
  * 202·422 인데 orderId·amount 불일치 → UNKNOWN + 충돌 사유(key 없음), 그 밖의 응답·잘못된 JSON·timeout·연결 실패 → UNKNOWN.
- * 조회(목록·단건): 200 → FOUND + 거래, 단건 404 → FOUND + 0건, 그 밖의 응답·잘못된 JSON·timeout·연결 실패 → UNAVAILABLE.
- * enabled=false 면 세 메서드 모두 IllegalStateException 을 던지고 서버에 요청을 보내지 않는다.
+ * 조회(목록·단건): 200 → FOUND + 거래, 단건 404 → FOUND + 0건, 그 밖의 응답·잘못된 JSON·timeout·연결 실패 → UNAVAILABLE(CALL_FAILED).
+ * 조회 두 경로는 서킷브레이커 하나로 감싼다 (설계 5-7 결정 ㉗~㉜). UNAVAILABLE(CALL_FAILED) 결과만 실패 표본으로 세고 FOUND(빈 목록·404 포함)는 성공이다.
+ * 서킷이 OPEN 이면 HTTP 호출 없이 UNAVAILABLE(CIRCUIT_OPEN) 을 돌려준다. create 는 서킷과 무관하다.
+ * enabled=false 면 세 메서드 모두 IllegalStateException 을 던지고 서버에 요청을 보내지 않는다. 서킷보다 먼저 검사한다.
  */
 @Component
 public class HttpPaymentGateway implements PaymentGateway {
@@ -52,18 +58,22 @@ public class HttpPaymentGateway implements PaymentGateway {
      */
     private record RawResponse(int status, String body) {}
 
+    private static final String LOOKUP_CIRCUIT_BREAKER_NAME = "payment-pg-lookup";
+
     private final PaymentGatewayProperties properties;
     private final ObjectMapper objectMapper;
-    private final Clock clock;
     private final RestClient restClient;
+    private final CircuitBreaker lookupCircuitBreaker;
 
     /**
-     * clock 은 4단계 서킷브레이커의 시계다 (설계 5-7 결정 ㉗~㉜). 운영은 Clock 빈, 계약 테스트는 앞당길 수 있는 시계를 넣는다.
+     * clock 은 서킷브레이커의 시계다 (OPEN 대기 판정). 운영은 Clock 빈, 계약 테스트는 앞당길 수 있는 시계를 넣는다.
+     * 서킷 설정의 sliding-window-type 이 잘못된 값이면 여기서 IllegalArgumentException 으로 기동이 실패한다. 조용히 기본값으로 넘어가지 않는다.
      */
     public HttpPaymentGateway(PaymentGatewayProperties properties, ObjectMapper objectMapper, Clock clock) {
         this.properties = properties;
         this.objectMapper = objectMapper;
-        this.clock = clock;
+        this.lookupCircuitBreaker = CircuitBreaker.of(
+            LOOKUP_CIRCUIT_BREAKER_NAME, lookupCircuitBreakerConfig(properties.circuitBreaker(), clock));
 
         HttpClient httpClient = HttpClient.newBuilder()
             .version(HttpClient.Version.HTTP_1_1)
@@ -106,6 +116,43 @@ public class HttpPaymentGateway implements PaymentGateway {
     @Override
     public PaymentLookupResult findAllByOrderId(String providerOrderId) {
         requireEnabled();
+        return guardedByCircuit(() -> lookUpList(providerOrderId));
+    }
+
+    /**
+     * GET /api/v1/payments/{transactionKey}. 200 → FOUND + 1건, 404 → FOUND + 0건, 그 밖의 실패 → UNAVAILABLE.
+     */
+    @Override
+    public PaymentLookupResult findByTransactionKey(String transactionKey) {
+        requireEnabled();
+        return guardedByCircuit(() -> lookUpSingle(transactionKey));
+    }
+
+    /**
+     * "HTTP 호출 + 해석" 전체를 서킷으로 감싼다. 호출을 막으면(OPEN) 서버에 요청을 보내지 않고 CIRCUIT_OPEN 을 돌려준다.
+     */
+    private PaymentLookupResult guardedByCircuit(Supplier<PaymentLookupResult> lookup) {
+        try {
+            return lookupCircuitBreaker.executeSupplier(lookup);
+        } catch (CallNotPermittedException e) {
+            return PaymentLookupResult.unavailable(PaymentLookupResult.UnavailableReason.CIRCUIT_OPEN);
+        }
+    }
+
+    private static CircuitBreakerConfig lookupCircuitBreakerConfig(PaymentGatewayProperties.CircuitBreaker settings, Clock clock) {
+        return CircuitBreakerConfig.custom()
+            .slidingWindowType(CircuitBreakerConfig.SlidingWindowType.valueOf(settings.slidingWindowType()))
+            .slidingWindowSize(settings.slidingWindowSize())
+            .minimumNumberOfCalls(settings.minimumNumberOfCalls())
+            .failureRateThreshold(settings.failureRateThreshold())
+            .waitDurationInOpenState(settings.waitDurationInOpenState())
+            .permittedNumberOfCallsInHalfOpenState(settings.permittedNumberOfCallsInHalfOpenState())
+            .recordResult(result -> result instanceof PaymentLookupResult lookup && lookup.isUnavailable())
+            .clock(clock)
+            .build();
+    }
+
+    private PaymentLookupResult lookUpList(String providerOrderId) {
         RawResponse response;
         try {
             response = restClient.get()
@@ -132,12 +179,7 @@ public class HttpPaymentGateway implements PaymentGateway {
         }
     }
 
-    /**
-     * GET /api/v1/payments/{transactionKey}. 200 → FOUND + 1건, 404 → FOUND + 0건, 그 밖의 실패 → UNAVAILABLE.
-     */
-    @Override
-    public PaymentLookupResult findByTransactionKey(String transactionKey) {
-        requireEnabled();
+    private PaymentLookupResult lookUpSingle(String transactionKey) {
         RawResponse response;
         try {
             response = restClient.get()
