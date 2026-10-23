@@ -1,5 +1,7 @@
 package com.loopers.domain.payment;
 
+import com.loopers.application.order.OrderCommand;
+import com.loopers.application.order.OrderFacade;
 import com.loopers.domain.order.Order;
 import com.loopers.domain.order.OrderItem;
 import com.loopers.domain.product.Price;
@@ -7,6 +9,7 @@ import com.loopers.domain.product.Product;
 import com.loopers.domain.product.StockReservation;
 import com.loopers.domain.user.User;
 import com.loopers.infrastructure.order.OrderJpaRepository;
+import com.loopers.infrastructure.payment.HttpPaymentGateway;
 import com.loopers.infrastructure.payment.PaymentAttemptJpaRepository;
 import com.loopers.infrastructure.product.ProductJpaRepository;
 import com.loopers.infrastructure.product.StockReservationJpaRepository;
@@ -27,10 +30,13 @@ import java.util.List;
 import java.util.concurrent.Callable;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * TX B(PaymentResultService)가 같은 결과를 한 번만 반영하는지 실제 MySQL 로 검증한다.
  * TX A 를 거치지 않고 "재고 5 에서 2 를 확보한 뒤, PG 가 PENDING 으로 수락한" 상태를 DB 에 직접 심는다.
+ * 이 클래스는 가짜 PG(FakePaymentGatewayConfig)를 @Import 하지 않는다. 운영 PG 빈이 그대로 뜨는 컨텍스트라
+ * "가짜 없이 confirm 하면 크게 실패한다" 장면(WithoutFakeGateway)도 여기서 본다.
  */
 @SpringBootTest
 class PaymentResultServiceIntegrationTest {
@@ -39,6 +45,8 @@ class PaymentResultServiceIntegrationTest {
     private static final String TRANSACTION_KEY = "FAKE-TX-000001";
 
     private final PaymentResultService paymentResultService;
+    private final OrderFacade orderFacade;
+    private final PaymentGateway paymentGateway;
     private final UserJpaRepository userJpaRepository;
     private final ProductJpaRepository productJpaRepository;
     private final OrderJpaRepository orderJpaRepository;
@@ -50,6 +58,8 @@ class PaymentResultServiceIntegrationTest {
     @Autowired
     public PaymentResultServiceIntegrationTest(
         PaymentResultService paymentResultService,
+        OrderFacade orderFacade,
+        PaymentGateway paymentGateway,
         UserJpaRepository userJpaRepository,
         ProductJpaRepository productJpaRepository,
         OrderJpaRepository orderJpaRepository,
@@ -59,6 +69,8 @@ class PaymentResultServiceIntegrationTest {
         DatabaseCleanUp databaseCleanUp
     ) {
         this.paymentResultService = paymentResultService;
+        this.orderFacade = orderFacade;
+        this.paymentGateway = paymentGateway;
         this.userJpaRepository = userJpaRepository;
         this.productJpaRepository = productJpaRepository;
         this.orderJpaRepository = orderJpaRepository;
@@ -174,6 +186,35 @@ class PaymentResultServiceIntegrationTest {
             assertThat(attempt.getStatus()).isEqualTo(PaymentAttempt.Status.SUCCESS);
             assertThat(attempt.getTransactionKey()).isEqualTo(TRANSACTION_KEY);
             assertThat(orderOf(seed).getStatus()).isEqualTo(Order.OrderStatus.CONFIRMED);
+        }
+    }
+
+    @DisplayName("가짜 PG 를 올리지 않은 컨텍스트에서, ")
+    @Nested
+    class WithoutFakeGateway {
+        @DisplayName("운영 PG 빈은 실제 HTTP adapter 이고 test 프로필(enabled=false)에서는 confirm 이 IllegalStateException 으로 크게 실패한다. 시도는 REQUESTED 로 남고 조용히 UNKNOWN 이 되지 않는다.")
+        @Test
+        void failsLoudly_whenConfirmReachesDisabledRealAdapter() {
+            // arrange
+            Long userId = userJpaRepository.save(new User()).getId();
+            Product product = new Product(1L, "상품", new Price(1000L));
+            product.changeStock(5);
+            Long productId = productJpaRepository.save(product).getId();
+            Long orderId = orderFacade.createOrder(userId, List.of(new OrderCommand.Item(productId, 2))).orderId();
+
+            // act & assert - 빈 자체가 실제 adapter 여야 한다 (껍데기나 가짜가 아님)
+            assertThat(paymentGateway).isInstanceOf(HttpPaymentGateway.class);
+            assertThrows(IllegalStateException.class,
+                () -> orderFacade.confirmOrder(userId, orderId, new OrderCommand.Confirm("k1", "TEST", "0000-0000-0000-0000")));
+
+            // assert - TX A 는 커밋됐고(재고 3·예약 RESERVED), 시도는 REQUESTED 그대로다
+            PaymentAttempt attempt = paymentAttemptJpaRepository.findByOrderId(orderId).orElseThrow();
+            assertThat(attempt.getStatus()).isEqualTo(PaymentAttempt.Status.REQUESTED);
+            assertThat(attempt.getTransactionKey()).isNull();
+            assertThat(orderJpaRepository.findById(orderId).orElseThrow().getStatus()).isEqualTo(Order.OrderStatus.PAYMENT_PENDING);
+            assertThat(stockReservationJpaRepository.findAllByOrderId(orderId))
+                .singleElement().extracting(StockReservation::getStatus).isEqualTo(StockReservation.Status.RESERVED);
+            assertThat(stockOf(productId)).isEqualTo(3);
         }
     }
 

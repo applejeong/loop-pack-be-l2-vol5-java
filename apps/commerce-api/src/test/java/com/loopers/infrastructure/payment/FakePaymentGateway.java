@@ -1,5 +1,6 @@
 package com.loopers.infrastructure.payment;
 
+import com.loopers.domain.payment.PaymentAttempt;
 import com.loopers.domain.payment.PaymentCreateCommand;
 import com.loopers.domain.payment.PaymentCreateResult;
 import com.loopers.domain.payment.PaymentGateway;
@@ -9,7 +10,6 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 import java.util.Comparator;
 import java.util.List;
-import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -26,9 +26,11 @@ public class FakePaymentGateway implements PaymentGateway {
      * ACCEPT_PENDING: 거래 생성 + 202 PENDING 수락.
      * REJECT_NO_EFFECT: 거래 없이 효과 0건 확정 거절.
      * CREATE_BUT_LOSE_RESPONSE: 거래는 만들지만 응답이 유실되어 UNKNOWN 을 돌려준다.
+     * ACCEPT_WITH_MISMATCHED_AMOUNT: 202 인데 본문 금액이 요청과 다르다. 거래는 그 다른 금액으로 생기고 UNKNOWN + 충돌 사유를 돌려준다 (설계 결정 ㉕).
+     * REJECT_WITH_MISMATCHED_ORDER_ID: 422 + 정확한 code + false 인데 orderId 가 다르다. 거래 없이 UNKNOWN + 충돌 사유를 돌려준다 (설계 결정 ⑱).
      */
     public enum NextCreate {
-        ACCEPT_PENDING, REJECT_NO_EFFECT, CREATE_BUT_LOSE_RESPONSE
+        ACCEPT_PENDING, REJECT_NO_EFFECT, CREATE_BUT_LOSE_RESPONSE, ACCEPT_WITH_MISMATCHED_AMOUNT, REJECT_WITH_MISMATCHED_ORDER_ID
     }
 
     private static final String TRANSACTION_KEY_FORMAT = "FAKE-TX-%06d";
@@ -52,6 +54,14 @@ public class FakePaymentGateway implements PaymentGateway {
 
     public void willCreateButLoseResponse() {
         nextCreate = NextCreate.CREATE_BUT_LOSE_RESPONSE;
+    }
+
+    public void willAcceptWithMismatchedAmount() {
+        nextCreate = NextCreate.ACCEPT_WITH_MISMATCHED_AMOUNT;
+    }
+
+    public void willRejectWithMismatchedOrderId() {
+        nextCreate = NextCreate.REJECT_WITH_MISMATCHED_ORDER_ID;
     }
 
     /**
@@ -124,6 +134,11 @@ public class FakePaymentGateway implements PaymentGateway {
                 store(command);
                 yield PaymentCreateResult.unknown();
             }
+            case ACCEPT_WITH_MISMATCHED_AMOUNT -> {
+                store(command.providerOrderId(), command.amount() + 1);
+                yield PaymentCreateResult.unknownWithConflict(PaymentAttempt.ConflictReason.AMOUNT_MISMATCH);
+            }
+            case REJECT_WITH_MISMATCHED_ORDER_ID -> PaymentCreateResult.unknownWithConflict(PaymentAttempt.ConflictReason.ORDER_MISMATCH);
         };
     }
 
@@ -141,10 +156,17 @@ public class FakePaymentGateway implements PaymentGateway {
             .toList());
     }
 
+    /**
+     * 목록 조회와 같은 규칙이다. 있으면 FOUND + 1건, 없으면 FOUND + 0건, willFailLookups() 뒤에는 UNAVAILABLE.
+     */
     @Override
-    public Optional<PaymentTransaction> findByTransactionKey(String transactionKey) {
+    public PaymentLookupResult findByTransactionKey(String transactionKey) {
         observeLookup();
-        return Optional.ofNullable(transactions.get(transactionKey));
+        if (failLookups) {
+            return PaymentLookupResult.unavailable();
+        }
+        PaymentTransaction transaction = transactions.get(transactionKey);
+        return PaymentLookupResult.found(transaction == null ? List.of() : List.of(transaction));
     }
 
     private void observeLookup() {
@@ -155,9 +177,12 @@ public class FakePaymentGateway implements PaymentGateway {
     }
 
     private PaymentTransaction store(PaymentCreateCommand command) {
+        return store(command.providerOrderId(), command.amount());
+    }
+
+    private PaymentTransaction store(String providerOrderId, long amount) {
         String key = String.format(TRANSACTION_KEY_FORMAT, sequence.incrementAndGet());
-        PaymentTransaction transaction = new PaymentTransaction(
-            key, command.providerOrderId(), command.amount(), PaymentTransaction.Status.PENDING);
+        PaymentTransaction transaction = new PaymentTransaction(key, providerOrderId, amount, PaymentTransaction.Status.PENDING);
         transactions.put(key, transaction);
         return transaction;
     }

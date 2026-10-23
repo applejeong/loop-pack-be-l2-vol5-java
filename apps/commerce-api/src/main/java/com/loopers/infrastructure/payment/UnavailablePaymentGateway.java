@@ -4,10 +4,7 @@ import com.loopers.domain.payment.PaymentCreateCommand;
 import com.loopers.domain.payment.PaymentCreateResult;
 import com.loopers.domain.payment.PaymentGateway;
 import com.loopers.domain.payment.PaymentLookupResult;
-import com.loopers.domain.payment.PaymentTransaction;
 import org.springframework.stereotype.Component;
-
-import java.util.Optional;
 
 /**
  * 실제 HTTP adapter(3단계)가 생기기 전까지의 운영 껍데기. 호출되면 즉시 예외를 던진다.
@@ -27,7 +24,7 @@ public class UnavailablePaymentGateway implements PaymentGateway {
     }
 
     @Override
-    public Optional<PaymentTransaction> findByTransactionKey(String transactionKey) {
+    public PaymentLookupResult findByTransactionKey(String transactionKey) {
         throw unavailable();
     }
 

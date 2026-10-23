@@ -366,6 +366,59 @@ class OrderPaymentIntegrationTest {
             assertThat(fakePaymentGateway.transactions()).isEmpty();
             assertThat(fakePaymentGateway.createCount()).isEqualTo(1);
         }
+
+        @DisplayName("202 인데 본문 금액이 요청과 다르면, 시도 UNKNOWN + 충돌(AMOUNT_MISMATCH)·key 없음·주문 PAYMENT_PENDING·예약 RESERVED·재고 3 이고 create 는 1회다 (결정 ㉕).")
+        @Test
+        void keepsUnknownWithConflict_whenAcceptedResponseAmountDiffers() {
+            // arrange
+            fakePaymentGateway.willAcceptWithMismatchedAmount();
+            Long userId = saveUser();
+            Long productId = saveProduct("상품", 1000L, 5);
+            Long orderId = createOrder(userId, productId, 2);
+
+            // act
+            OrderConfirmInfo info = confirm(userId, orderId, "k1");
+
+            // assert
+            assertThat(info.settled()).isFalse();
+            assertThat(info.attemptStatus()).isEqualTo("UNKNOWN");
+            assertUnknownWithConflict(orderId, productId, PaymentAttempt.ConflictReason.AMOUNT_MISMATCH);
+            assertThat(fakePaymentGateway.transactions()).hasSize(1);
+            assertThat(fakePaymentGateway.createCount()).isEqualTo(1);
+        }
+
+        @DisplayName("422 + 정확한 code + false 인데 orderId 가 다르면, 거절로 종결하지 않고 시도 UNKNOWN + 충돌(ORDER_MISMATCH)·예약 유지·재고 3 이다 (결정 ⑱).")
+        @Test
+        void keepsUnknownWithConflict_whenRejectionOrderIdDiffers() {
+            // arrange
+            fakePaymentGateway.willRejectWithMismatchedOrderId();
+            Long userId = saveUser();
+            Long productId = saveProduct("상품", 1000L, 5);
+            Long orderId = createOrder(userId, productId, 2);
+
+            // act
+            OrderConfirmInfo info = confirm(userId, orderId, "k1");
+
+            // assert
+            assertThat(info.settled()).isFalse();
+            assertThat(info.attemptStatus()).isEqualTo("UNKNOWN");
+            assertUnknownWithConflict(orderId, productId, PaymentAttempt.ConflictReason.ORDER_MISMATCH);
+            assertThat(fakePaymentGateway.transactions()).isEmpty();
+            assertThat(fakePaymentGateway.createCount()).isEqualTo(1);
+        }
+
+        private void assertUnknownWithConflict(Long orderId, Long productId, PaymentAttempt.ConflictReason expectedReason) {
+            PaymentAttempt attempt = attemptOf(orderId);
+            assertThat(attempt.getStatus()).isEqualTo(PaymentAttempt.Status.UNKNOWN);
+            assertThat(attempt.getTransactionKey()).isNull();
+            assertThat(attempt.isConflicted()).isTrue();
+            assertThat(attempt.getConflictReason()).isEqualTo(expectedReason);
+            assertThat(attempt.getConflictedAt()).isNotNull();
+            assertThat(orderOf(orderId).getStatus()).isEqualTo(Order.OrderStatus.PAYMENT_PENDING);
+            assertThat(reservationsOf(orderId)).singleElement()
+                .extracting(StockReservation::getStatus).isEqualTo(StockReservation.Status.RESERVED);
+            assertThat(stockOf(productId)).isEqualTo(3);
+        }
     }
 
     @DisplayName("기존 기능 보호 — ")
