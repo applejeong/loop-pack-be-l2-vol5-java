@@ -84,7 +84,7 @@ public class PaymentResultService {
      */
     @Transactional
     public void recordConflict(Long attemptId, PaymentAttempt.ConflictReason reason) {
-        throw new UnsupportedOperationException("2단계 미구현");
+        paymentAttemptRepository.recordConflict(attemptId, reason, ZonedDateTime.now());
     }
 
     /**
@@ -92,6 +92,6 @@ public class PaymentResultService {
      */
     @Transactional
     public void recordLookup(Long attemptId, ZonedDateTime nextLookupAt, boolean manualCheckRequired) {
-        throw new UnsupportedOperationException("2단계 미구현");
+        paymentAttemptRepository.recordLookup(attemptId, nextLookupAt, manualCheckRequired);
     }
 }
