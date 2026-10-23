@@ -269,8 +269,9 @@ class PaymentScheduledLookupIntegrationTest {
         // act
         paymentFacade.runScheduledLookups();
 
-        // assert - 둘 다 조회를 시도했고, 정상 건은 기록됐다
+        // assert - 둘 다 조회를 시도했고, 정상 건은 기록됐다. 예외가 난 건도 실제로 물어봤으므로 1회로 센다
         assertThat(fakePaymentGateway.lookupCallCount()).isEqualTo(2);
+        assertThat(attemptOf(failingOrderId).getLookupCount()).isEqualTo(1);
         assertThat(attemptOf(healthyOrderId).getLookupCount()).isEqualTo(1);
         assertThat(attemptOf(healthyOrderId).getStatus()).isEqualTo(PaymentAttempt.Status.PENDING);
     }
