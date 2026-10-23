@@ -143,21 +143,22 @@ class PaymentScheduledLookupIntegrationTest {
         paymentResultService.applyFinal(settled.getId(), PaymentFinalResult.success(settled.getTransactionKey()));
         Long manualOrderId = saveAttemptFixture(userId, productId, 1, "manual", PaymentAttempt.Status.UNKNOWN);
         jdbcTemplate.update("UPDATE payment_attempts SET manual_check_required = true WHERE order_id = ?", manualOrderId);
-        fakePaymentGateway.reset();
+        int base = fakePaymentGateway.lookupCallCount();
 
         // act 1 - 지금: 미종결 시도도 아직 60초가 안 지났다
         facade.runScheduledLookups();
 
         // assert 1
-        assertThat(fakePaymentGateway.lookupCallCount()).isZero();
+        assertThat(fakePaymentGateway.lookupCallCount()).isEqualTo(base);
 
         // act 2 - 2분 뒤
         setClock(now.plus(Duration.ofMinutes(2)));
         facade.runScheduledLookups();
 
-        // assert 2 - 미종결 1건만 조회됐다
-        assertThat(fakePaymentGateway.lookupCallCount()).isEqualTo(1);
+        // assert 2 - 미종결 1건만 조회됐다. 가짜 PG 에 그 주문의 PENDING 거래 1건이 있어 UNKNOWN → PENDING 경로를 탄다
+        assertThat(fakePaymentGateway.lookupCallCount()).isEqualTo(base + 1);
         assertThat(attemptOf(openOrderId).getLookupCount()).isEqualTo(1);
+        assertThat(attemptOf(openOrderId).getStatus()).isEqualTo(PaymentAttempt.Status.PENDING);
         assertThat(attemptOf(settledOrderId).getLookupCount()).isZero();
         assertThat(attemptOf(manualOrderId).getLookupCount()).isZero();
     }
@@ -171,7 +172,7 @@ class PaymentScheduledLookupIntegrationTest {
         Long productId = saveProduct(1000L, 5);
         Long orderId = createOrder(userId, productId, 2);
         startPaymentWithLostResponse(userId, orderId, "k1");
-        fakePaymentGateway.reset();
+        int base = fakePaymentGateway.lookupCallCount();
 
         // act 1
         facade.runScheduledLookups();
@@ -194,7 +195,7 @@ class PaymentScheduledLookupIntegrationTest {
         assertThat(afterSecond.getLookupCount()).isEqualTo(2);
         assertThat(afterSecond.getNextLookupAt().toInstant()).isEqualTo(later);
         assertThat(afterSecond.getStatus()).isEqualTo(PaymentAttempt.Status.PENDING);
-        assertThat(fakePaymentGateway.lookupCallCount()).isEqualTo(2);
+        assertThat(fakePaymentGateway.lookupCallCount()).isEqualTo(base + 2);
     }
 
     @DisplayName("간격 증가: 첫 간격 1분·배수 2·상한 4분이면, 다음 조회까지의 간격이 1분 → 2분 → 4분 → 4분(상한)으로 늘어난다.")
@@ -234,7 +235,7 @@ class PaymentScheduledLookupIntegrationTest {
         Long productId = saveProduct(1000L, 5);
         Long orderId = createOrder(userId, productId, 2);
         startPaymentWithLostResponse(userId, orderId, "k1");
-        fakePaymentGateway.reset();
+        int base = fakePaymentGateway.lookupCallCount();
 
         // act 1 - 두 번 실행하면 한도에 닿는다
         paymentFacade.runScheduledLookups();
@@ -248,13 +249,13 @@ class PaymentScheduledLookupIntegrationTest {
         assertThat(orderOf(orderId).getStatus()).isEqualTo(Order.OrderStatus.PAYMENT_PENDING);
         assertThat(reservationStatusesOf(orderId)).containsExactly(StockReservation.Status.RESERVED);
         assertThat(stockOf(productId)).isEqualTo(3);
-        assertThat(fakePaymentGateway.lookupCallCount()).isEqualTo(2);
+        assertThat(fakePaymentGateway.lookupCallCount()).isEqualTo(base + 2);
 
         // act 2 - 더 실행해도 대상이 아니다
         paymentFacade.runScheduledLookups();
 
         // assert 2
-        assertThat(fakePaymentGateway.lookupCallCount()).isEqualTo(2);
+        assertThat(fakePaymentGateway.lookupCallCount()).isEqualTo(base + 2);
         assertThat(attemptOf(orderId).getLookupCount()).isEqualTo(2);
     }
 
@@ -310,13 +311,14 @@ class PaymentScheduledLookupIntegrationTest {
         Long productId = saveProduct(1000L, 5);
         Long orderId = createOrder(userId, productId, 2);
         startPaymentWithLostResponse(userId, orderId, "k1");
-        fakePaymentGateway.reset();
+        int base = fakePaymentGateway.lookupCallCount();
 
         // act
         paymentFacade.runScheduledLookups();
 
-        // assert
-        assertThat(fakePaymentGateway.lookupCallCount()).isEqualTo(1);
+        // assert - 거래 1건이 있는 상태에서 조회·반영(UNKNOWN → PENDING)까지 했고, 그동안 TX 를 보유하지 않았다
+        assertThat(fakePaymentGateway.lookupCallCount()).isEqualTo(base + 1);
+        assertThat(attemptOf(orderId).getStatus()).isEqualTo(PaymentAttempt.Status.PENDING);
         assertThat(fakePaymentGateway.lookupSeenInsideTransaction()).isFalse();
     }
 
