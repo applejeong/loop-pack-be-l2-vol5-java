@@ -1,7 +1,7 @@
 # 5주차 설계 · 포인트 결제 → 로컬 테스트 PG 교체
 
 - 이 문서 범위: 0장 이름 대조표 · 1장 트랜잭션 경계(예약 저장 형태, 결제 시도 식별자, create 응답 매핑 포함) · 2장 동시성 방식 · 3장 발송 시작 기록 · 4장 같은 주문의 confirm 재요청(202·200 응답 본문 포함) · 5장 PG 성공 뒤 내부 저장(TX B) 실패 · 6장 조율 위치 · 7장 PG 조회 결과가 0건·2건 이상·불일치일 때 · 8장 상태 모델(결제 시도·주문·예약 상태 전이) · 부록 결정 필요(현재 없음)
-- 이 문서 범위 밖: PG adapter의 HTTP 요청·응답 매핑 세부, circuit breaker·retry 수치, 테스트 구성. 과제 2·5·6장에 해당하며 별도 문서로 다룬다. callback·reconcile 의 상세 계약은 이 문서에서 정했다. 조율 위치는 6장, 202·200 응답 모양은 4-6, callback 입구 검사·인증은 7-5 결정 ⑲, reconcile 입구 검사·조회 실패 응답은 5-6 결정 ⑳, 스케줄러의 조회 한도 계산 범위·설정값은 5-3 결정 ⑫다.
+- 이 문서 범위 밖: PG adapter의 HTTP 요청·응답 매핑 세부, circuit breaker·retry 수치, 테스트 구성. 과제 2·5·6장에 해당하며 별도 문서로 다룬다. callback·reconcile 의 상세 계약은 이 문서에서 정했다. 조율 위치는 6장, 202·200 응답 모양은 4-6, callback 입구 검사·인증은 7-5 결정 ⑲, reconcile 입구 검사·조회 실패 응답은 5-6 결정 ⑳, 스케줄러의 조회 한도 계산 범위·설정값은 5-3 결정 ⑫다. 3단계 HTTP adapter 의 클라이언트·고정 설정·timeout 자리·202 불일치·계약 테스트 방식은 1-6 결정 ㉑~㉖에서 정했다. 요청·응답 매핑 세부와 circuit breaker·retry 수치는 여전히 범위 밖이다.
 - 표기 규칙: **과제 근거**는 원문 섹션명과 문장을 인용한다. **판단:** 은 과제가 정하지 않아 내가 고른 것이다. **결정 필요** 는 이 문서에서 정하지 않고 선택지만 남긴 것이다.
 
 ---
@@ -48,8 +48,12 @@
 | 합성 카드 입력 | `PaymentCard(cardType, cardNo)` | **신규** (허용 목록: cardType `TEST`, 번호 `0000-0000-0000-0000`. 그 외 `BAD_REQUEST`) |
 | PG 생성 요청·관찰 결과·거래 | `PaymentCreateCommand`, `PaymentCreateResult(outcome ACCEPTED/REJECTED_NO_EFFECT/UNKNOWN)`, `PaymentTransaction` | **신규** (포트의 입출력. 카드 번호는 `toString` 에서 가린다) |
 | confirm 응답 재료 | `OrderConfirmInfo(order, attemptStatus, settled, lookupUnavailable)` | **신규** (`settled` 로 202/200 을 가른다. `lookupUnavailable` 은 2단계 reconcile 용, confirm 은 항상 false) |
-| PG 조회 관찰 결과 | `PaymentLookupResult(outcome FOUND/UNAVAILABLE, transactions)` | **신규** (2단계. `PaymentGateway.findAllByOrderId` 의 반환형. timeout·4단계 회로 차단은 UNAVAILABLE) |
-| PG 포트 운영 껍데기 | `UnavailablePaymentGateway` (infrastructure, 호출 시 `IllegalStateException`) | **신규** (3단계에서 실제 HTTP adapter 로 교체·삭제) |
+| PG 조회 관찰 결과 | `PaymentLookupResult(outcome FOUND/UNAVAILABLE, transactions)` | **신규** (2단계. 목록·단건 조회 공통 반환형. 단건 404 는 FOUND + 0건, timeout·4단계 회로 차단은 UNAVAILABLE. 7-3 참조) |
+| PG 포트 운영 껍데기 | `UnavailablePaymentGateway` (infrastructure, 호출 시 `IllegalStateException`) | **신규** (3단계-B 에서 `HttpPaymentGateway` 로 교체·삭제. 1-6 결정 ㉓ 참조) |
+| PG 실제 HTTP adapter | `HttpPaymentGateway` (infrastructure. `RestClient` + JDK `HttpClient` 를 안에서 조립) | **신규** (3단계-A 껍데기, 3단계-B 에서 구현·`@Component` 등록. 1-6 결정 ㉑ 참조) |
+| PG adapter 설정값 | `PaymentGatewayProperties` ← `payment.pg.*` (`enabled`, `base-url`, `callback-url`, `user-id`, `connect-timeout`, `read-timeout`) | **신규** (3단계. 1-6 결정 ㉒·㉓·㉔ 참조) |
+| create 응답의 불일치 표시 | `PaymentCreateResult.conflictReason`, `unknownWithConflict(reason)` | **신규** (3단계. UNKNOWN + 충돌 사유. 1-6 결정 ⑱·㉕ 참조) |
+| 계약 테스트용 PG 서버 | `TestPaymentPgServer` (테스트 소스, JDK `HttpServer`) | **신규** (3단계. 1-6 결정 ㉖ 참조) |
 | 테스트 전용 가짜 PG | `FakePaymentGateway` + `FakePaymentGatewayConfig`(`@TestConfiguration`, `@Primary`) | **신규** (테스트 소스. `@Import` 한 테스트에서만 등록) |
 | 스케줄러 조회 설정값 | `payment.lookup.*` (`@ConfigurationProperties`. 등록은 기존 `@ConfigurationPropertiesScan` 이 맡는다) | **신규** (2단계. 5-3 결정 ⑫ 설정값 표 참조) |
 | reconcile 응답의 확인 불가 표시 | 4-6 응답 `data` 의 `lookupUnavailable` | **신규** (2단계. 5-6 결정 ⑳ 참조) |
@@ -297,6 +301,7 @@ create 응답에서 `SUCCESS` 는 오지 않는다. 과제 계약이 생성 수�
 | 잘못된 JSON | 증거 아님 | `UNKNOWN` | `PAYMENT_PENDING` 유지 | `RESERVED` 유지 |
 | timeout·응답 유실 | 증거 아님 | `UNKNOWN` | `PAYMENT_PENDING` 유지 | `RESERVED` 유지 |
 | 422 + 정확한 code + `false` 인데 `orderId`·`amount` 불일치 | 증거 아님 + 이상 신호 | `UNKNOWN` + 충돌 표시 (결정 ⑱) | `PAYMENT_PENDING` 유지 | `RESERVED` 유지 |
+| 202 인데 본문 `orderId`·`amount` 가 요청과 불일치 | 접수 증거 아님 + 이상 신호 | `UNKNOWN` + 충돌 표시. `transactionKey` 저장 안 함 (결정 ㉕) | `PAYMENT_PENDING` 유지 | `RESERVED` 유지 |
 
 **중복 적용도 반환을 늘리지 않는다.** create 응답도 callback·reconcile 과 같은 TX B 문지기(⑥, 미종결일 때만)를 거친다. 같은 거절이 두 번 적용되면 두 번째는 0행이 되어 ⑦⑧이 실행되지 않는다.
 
@@ -313,13 +318,88 @@ create 응답에서 `SUCCESS` 는 오지 않는다. 과제 계약이 생성 수�
 
 #### 결정 ⑱ orderId·amount 불일치 422 (확정 · **3단계에서 구현**)
 
-구현 시점: 1·2단계에서는 구현하지 않았다. 충돌 컬럼은 2단계에서 생기고, create 응답 본문을 실제로 읽는 HTTP adapter 가 3단계에 생기므로 그때 함께 구현한다.
+구현 시점: 1·2단계에서는 구현하지 않았다. 충돌 컬럼은 2단계에서 생기고, create 응답 본문을 실제로 읽는 HTTP adapter 가 3단계에 생기므로 그때 함께 구현한다. **3단계가 이 결정의 구현 단계다.** 아래 결정 ㉕(202 접수 응답의 불일치)와 같은 기준이며, 둘 다 3단계 adapter 의 응답 매핑에서 함께 구현한다.
 
 네 조건 중 `orderId`·`amount` 일치만 어긋난 422 는 `UNKNOWN` 으로 두고 **충돌 표시**(7-2 의 `conflicted`·`conflictReason`·`conflictedAt`)를 함께 기록한다. 예약은 유지한다.
 
 **판단:** 7장에서 조회 결과의 금액·식별 불일치를 충돌로 기록하기로 정했다. 같은 기준을 create 응답에도 적용한다. 우리가 보낸 값과 다른 값이 돌아온 것은 어느 경로든 이상 신호다.
 
 기각: `UNKNOWN` 만 기록. 이상 신호가 평범한 미확인에 묻혀 사라진다.
+
+#### 결정 ㉑ HTTP 클라이언트 (확정 · **3단계에서 구현**)
+
+`RestClient` + JDK `HttpClient`(`JdkClientHttpRequestFactory`) 를 쓴다. create(`POST`)·목록 조회·단건 조회 모두 같은 클라이언트다.
+
+> **과제 근거** (Java·Kotlin · 클라이언트와 회복 도구 연결)
+> "두 트랙의 기존 Spring Web 의존성을 바탕으로 HTTP client를 선택합니다. RestClient 같은 동기 client를 사용할 수 있으며 Feign·WebClient를 새 필수로 만들지 않습니다."
+
+> **과제 근거** (3. 기존 주문 확정에 PG 연결)
+> "생성 HTTP client·프록시·회복 라이브러리의 숨은 재시도도 끕니다."
+
+**판단:** 추가 의존성이 없고, JDK `HttpClient` 는 `POST` 를 몰래 다시 보내지 않는다. 1-2 의 "TX 밖 · 자동 재시도 없음"과 3장의 "create 는 1회"가 클라이언트 계층에서도 지켜진다.
+
+기각한 대안
+
+| 대안 | 기각 이유 |
+|---|---|
+| `SimpleClientHttpRequestFactory` (`HttpURLConnection`) | 특정 연결 오류에서 `POST` 를 한 번 다시 보내는 기본 동작이 있어 create 가 두 번 나갈 수 있다. 과제가 금지한 "숨은 재시도"에 해당한다 |
+| Apache HttpClient 5 | 의존성이 추가되고, 기본 재시도 전략을 따로 꺼야 한다 |
+
+#### 결정 ㉒ adapter 고정 설정과 로그 (확정 · **3단계에서 구현**)
+
+base URL, callback URL, 제공자 계정 헤더(`X-USER-ID: 135135`)는 설정 파일(`payment.pg.*`, **신규**)에 고정한다. 고객 입력으로 바꿀 수 없다. 프록시를 거치지 않도록 클라이언트에 명시한다. HTTP 요청·응답 본문은 로그에 남기지 않는다.
+
+> **과제 근거** (2. 로컬 테스트 PG 계약과 adapter · 공통 · 거래 생성 전 확정 거절과 UNKNOWN 구분)
+> "카드 값은 위와 같은 합성 값만 사용하고 DB·로그에 카드 번호를 남기지 않습니다. base URL·callback URL은 로컬 설정으로 고정하며 고객이 임의의 외부 주소를 주입하게 하지 않습니다. 외부의 고정 X-USER-ID 는 내부 고객 인증을 대신하지 않습니다."
+
+**판단:** create 요청 본문에 카드 번호가 들어가므로 본문 로그는 곧 카드 번호 로그다. 1단계의 "카드 번호는 DB·로그에 남기지 않음"(4-4, `PaymentCreateCommand.toString` 마스킹)을 HTTP 계층까지 연장한 것이다. 프록시를 명시적으로 끄는 이유는 결정 ㉑과 같다. 프록시가 끼면 재시도·버퍼링이 우리 통제 밖에서 생긴다. 설정 키 이름 `payment.pg.*` 는 2단계의 `payment.lookup.*` 과 나란히 두기 위한 선택이다.
+
+#### 결정 ㉓ 테스트에서 실제 adapter 차단 (확정 · **3단계에서 구현**)
+
+adapter 에 `enabled` 설정을 두고 test 프로필에서 `false` 로 둔다. `false` 면 어떤 호출이든 즉시 예외를 던진다. 지금의 `UnavailablePaymentGateway` 는 3단계에서 삭제하고, 이 설정이 그 역할을 이어받는다. 가짜 PG(`FakePaymentGateway`, `@Primary`)를 `@Import` 한 테스트는 지금처럼 가짜를 쓴다.
+
+**판단:** 가짜 PG 를 등록하지 않은 테스트가 실제 HTTP 를 보내면, PG 가 없는 환경에서는 timeout → `UNKNOWN` 으로 조용히 통과한다. 실패가 "미확인"으로 위장되는 것이다. 1단계에서 `UnavailablePaymentGateway` 로 얻은 "크게 실패"를 실제 adapter 가 들어온 뒤에도 유지한다.
+
+기각: `UnavailablePaymentGateway` 를 남기고 프로필로 빈을 바꿔 끼움. 같은 포트의 구현이 운영용·껍데기·가짜 셋이 되어 어느 빈이 떴는지 읽기 어렵다.
+
+#### 결정 ㉔ timeout 설정 자리 (확정 · 값은 **4단계에서 확정**)
+
+연결 timeout 과 응답 대기 timeout 을 설정값(`payment.pg.*`)으로 두고 request factory 에 건다. 3단계는 자리와 임시값만 둔다. **0(무한 대기)은 금지한다.** 값의 확정은 4단계(회로 차단과 함께)에서 한다.
+
+> **과제 근거** (Java·Kotlin · 클라이언트와 회복 도구 연결)
+> "timeout은 실제 사용하는 request factory·하위 HTTP client에 설정합니다."
+
+> **과제 근거** (5. callback·조회·회복 전략)
+> "Timeout·fallback: 실제 PG HTTP 연결·응답 대기를 제한하고, 조회 실패·회로 차단에는 저장된 상태와 확인 불가를 반환합니다."
+
+**판단:** 무한 대기는 TX 밖 구간이라 DB 락은 잡지 않지만, 요청 스레드가 돌아오지 않아 confirm 응답이 영영 안 나간다. 임시값이라도 유한해야 한다.
+
+#### 결정 ㉕ 202 접수 응답의 orderId·amount 불일치 (확정 · **3단계에서 구현**)
+
+202 응답인데 본문의 `orderId`·`amount` 가 우리가 보낸 값과 다르면 `UNKNOWN` 으로 두고 충돌 표시(7-2)를 기록한다. 응답의 `transactionKey` 는 저장하지 않는다. 주문 `PAYMENT_PENDING`·예약 `RESERVED` 는 유지한다.
+
+> **과제 근거** (2. 로컬 테스트 PG 계약과 adapter · 공통 · 거래 생성 전 확정 거절과 UNKNOWN 구분)
+> "반대로 timeout, 본문 없는 422, 다른 오류 code의 4xx·5xx, 잘못된 JSON·식별·금액은 효과 0건의 증거가 아닙니다."
+
+**판단:** 결정 ⑱(422 불일치)과 같은 기준이다. 불일치는 효과 0건의 증거도, 정상 접수의 증거도 아니다. 다른 주문·금액에 붙은 `transactionKey` 를 저장하면 이후 7-4 의 "저장된 key 가 목록에 없음" 검사가 엉뚱한 거래를 기준으로 돌아간다. 저장하지 않으면 reconcile 의 목록 조회가 실제 거래 유무를 처음부터 다시 확인한다.
+
+기각: `PENDING` + key 저장. 우리가 보낸 것과 다른 거래를 "접수됨"으로 믿는 것이라 과제의 "알림의 성공 문자열만으로 확정하지 않는다"와 같은 이유로 맞지 않다.
+
+#### 결정 ㉖ 계약 테스트용 서버 (확정 · **3단계에서 구현**)
+
+adapter 의 HTTP 계약 테스트는 JDK 내장 `HttpServer`(`com.sun.net.httpserver`)를 테스트 안에서 띄워 실제 네트워크로 검증한다. 메서드·경로·헤더(`X-USER-ID`)·JSON 타입·금액과 응답 매핑(202, 네 조건 422, 본문 없는 422, 다른 code, 잘못된 JSON, 연결 끊김)을 본다.
+
+> **과제 근거** (2. 로컬 테스트 PG 계약과 adapter · 공통 · 거래 생성 전 확정 거절과 UNKNOWN 구분)
+> "실제 adapter가 보내는 HTTP의 메서드·경로·헤더·JSON 타입·금액과 응답 매핑을 테스트합니다. query는 URI builder로 인코딩하고 transactionKey 조회를 연결합니다."
+
+**판단:** 의존성 추가가 없고, 진짜 소켓을 거치므로 4단계의 timeout·연결 끊김 테스트에 같은 서버를 재사용할 수 있다.
+
+기각한 대안
+
+| 대안 | 기각 이유 |
+|---|---|
+| WireMock | 의존성 추가 |
+| `MockRestServiceServer` | 진짜 네트워크를 거치지 않아 timeout·연결 끊김을 만들 수 없다. 4단계에서 다시 바꿔야 한다 |
 
 ---
 
@@ -789,6 +869,8 @@ callback 과 reconcile 은 모두 PG 를 권위 조회한 뒤 TX B 에 들어간
 기각한 대안: `transactionKey` 가 저장돼 있으면 단건 조회만 한다. 그 거래 하나는 확인되지만 같은 주문의 추가 거래를 영영 보지 못한다.
 
 adapter 의 `transactionKey` 단건 조회(`GET /api/v1/payments/{transactionKey}`)는 과제 요구대로 구현하고 계약 테스트도 하되, **결과 판단에는 목록을 쓴다.**
+
+**판단:** 단건 조회도 목록 조회와 같은 결과 타입(`PaymentLookupResult`)을 쓴다. 200 은 FOUND + 1건, 404 는 FOUND + 0건, 5xx·잘못된 JSON·timeout 은 UNAVAILABLE 이다. `Optional` 로 두면 "거래 없음"과 "확인 불가"가 같은 empty 로 보여 구분되지 않는다.
 
 > **과제 근거** (2. 로컬 테스트 PG 계약과 adapter)
 > "query는 URI builder로 인코딩하고 transactionKey 조회를 연결합니다."
