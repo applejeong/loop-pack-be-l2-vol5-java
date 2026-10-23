@@ -11,6 +11,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Clock;
 import java.time.ZonedDateTime;
 
 /**
@@ -26,6 +27,7 @@ public class PaymentResultService {
     private final OrderRepository orderRepository;
     private final StockReservationRepository stockReservationRepository;
     private final ProductRepository productRepository;
+    private final Clock clock;
 
     /**
      * ⑥⑦⑧ 을 한 TX 로 실행한다.
@@ -84,7 +86,7 @@ public class PaymentResultService {
      */
     @Transactional
     public void recordConflict(Long attemptId, PaymentAttempt.ConflictReason reason) {
-        paymentAttemptRepository.recordConflict(attemptId, reason, ZonedDateTime.now());
+        paymentAttemptRepository.recordConflict(attemptId, reason, ZonedDateTime.now(clock));
     }
 
     /**

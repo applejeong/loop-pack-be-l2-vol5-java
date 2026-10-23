@@ -112,10 +112,14 @@ class PaymentScheduledLookupIntegrationTest {
         this.databaseCleanUp = databaseCleanUp;
     }
 
+    /**
+     * 고정 Clock 의 now 는 실제 시각 + 1분이다. 시도의 updatedAt 은 실제 시각이라 fixture 가 now 보다 뒤에 만들어지면
+     * min-age 0 에서도 "마지막 변경 후 0초 경과" 조건에 걸리지 않는다. 1분 뒤로 두면 그 뒤에 만든 fixture 도 대상이 된다.
+     */
     @BeforeEach
     void setUp() {
         fakePaymentGateway.reset();
-        now = Instant.now().truncatedTo(ChronoUnit.SECONDS);
+        now = Instant.now().truncatedTo(ChronoUnit.SECONDS).plus(Duration.ofMinutes(1));
         setClock(now);
     }
 
