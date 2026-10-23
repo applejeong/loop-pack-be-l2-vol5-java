@@ -80,11 +80,17 @@ public class OrderFacade {
 
     /**
      * create 응답 한 건을 TX B 에 넘긴다 (설계 1-6). 생성 수락과 미확인은 ⑥만, 효과 0건 확정 거절은 ⑥⑦⑧을 실행한다.
+     * 응답의 orderId·amount 가 요청과 달랐으면(결정 ⑱·㉕) UNKNOWN 으로 두고 충돌만 기록한다. transactionKey 는 저장하지 않고 예약은 유지한다.
      */
     private void applyCreateResult(PaymentStart start, PaymentCreateResult result) {
         switch (result.outcome()) {
             case ACCEPTED -> paymentResultService.recordPending(start.attemptId(), result.transactionKey());
-            case UNKNOWN -> paymentResultService.recordUnknown(start.attemptId());
+            case UNKNOWN -> {
+                paymentResultService.recordUnknown(start.attemptId());
+                if (result.conflictReason() != null) {
+                    paymentResultService.recordConflict(start.attemptId(), result.conflictReason());
+                }
+            }
             case REJECTED_NO_EFFECT -> paymentResultService.applyFinal(start.attemptId(),
                 PaymentFinalResult.failed(PaymentAttempt.FailureReason.REJECTED_BEFORE_CREATE, null));
         }
