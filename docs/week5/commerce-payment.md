@@ -41,13 +41,22 @@
 | 충돌 기록 | `PaymentAttempt.conflicted`, `conflictReason`, `conflictedAt` | **신규** (상태 컬럼과 별개, 7-2 참조) |
 | 실패 사유 | `PaymentAttempt.failureReason`, `FailureReason.REJECTED_BEFORE_CREATE`·`PG_FAILED` | **신규** (1-6 결정 ⑰ 참조) |
 | 스케줄러 조회 추적 | `PaymentAttempt.lookupCount`, `nextLookupAt`, `manualCheckRequired` | **신규** (상태 컬럼과 별개, 5-3 결정 ⑫ 참조) |
+| TX A 서비스 | `PaymentStartService.start(userId, orderId, PaymentStartCommand)` | **신규** (1단계-B 구현. ①~④를 한 TX 로 실행) |
+| TX A 입력·결과 | `PaymentStartCommand(attemptKey, cardType)`, `PaymentStart(kind STARTED/EXISTING, attemptId, providerOrderId, amount, cardType)` | **신규** (카드 번호는 TX A 에 들어가지 않는다) |
+| TX B 입력 | `PaymentFinalResult(status SUCCESS/FAILED, failureReason, transactionKey)` | **신규** (`PaymentResultService.applyFinal` 의 인자) |
+| TX B 비종결 기록 | `PaymentResultService.recordPending(attemptId, transactionKey)`, `recordUnknown(attemptId)` | **신규** (⑥만 실행) |
+| 합성 카드 입력 | `PaymentCard(cardType, cardNo)` | **신규** (허용 목록: cardType `TEST`, 번호 `0000-0000-0000-0000`. 그 외 `BAD_REQUEST`) |
+| PG 생성 요청·관찰 결과·거래 | `PaymentCreateCommand`, `PaymentCreateResult(outcome ACCEPTED/REJECTED_NO_EFFECT/UNKNOWN)`, `PaymentTransaction` | **신규** (포트의 입출력. 카드 번호는 `toString` 에서 가린다) |
+| confirm 응답 재료 | `OrderConfirmInfo(order, attemptStatus, settled)` | **신규** (`settled` 로 202/200 을 가른다) |
+| PG 포트 운영 껍데기 | `UnavailablePaymentGateway` (infrastructure, 호출 시 `IllegalStateException`) | **신규** (3단계에서 실제 HTTP adapter 로 교체·삭제) |
+| 테스트 전용 가짜 PG | `FakePaymentGateway` + `FakePaymentGatewayConfig`(`@TestConfiguration`, `@Primary`) | **신규** (테스트 소스. `@Import` 한 테스트에서만 등록) |
 
-이번 변경으로 쓰이지 않게 되는 기존 코드 (구현 시 제거 대상으로 함께 확인한다)
+이번 변경으로 쓰이지 않게 되는 기존 코드 (1단계-B 에서 삭제함)
 
 | 대상 | 이유 |
 |---|---|
-| `OrderRepository.confirmIfDraft` | DRAFT → CONFIRMED 직행 전이가 없어지고, ② DRAFT → PAYMENT_PENDING 과 ⑦ PAYMENT_PENDING → CONFIRMED 로 쪼개진다 |
-| `PointService.deduct` | 주문 확정에서 포인트를 차감하지 않는다. 호출자가 `OrderFacade.confirmOrder` 뿐이다 |
+| `OrderRepository.confirmIfDraft`, `OrderService.confirmOrder`, `OrderRepository.reload` | DRAFT → CONFIRMED 직행 전이가 없어지고, ② DRAFT → PAYMENT_PENDING 과 ⑦ PAYMENT_PENDING → CONFIRMED 로 쪼개진다. `reload` 는 `confirmOrder` 만 썼다 |
+| `PointService.deduct`, `PointRepository.deductIfEnough`, `Point.validateDeductAmount` | 주문 확정에서 포인트를 차감하지 않는다. 호출자가 `OrderFacade.confirmOrder` 뿐이었다 |
 
 > **과제 근거** (1. 교체 범위와 상태 설계)
 > "신규 PG 결제 시도·외부 거래·결과 확인 경계 추가 / 포인트 차감 0회"
