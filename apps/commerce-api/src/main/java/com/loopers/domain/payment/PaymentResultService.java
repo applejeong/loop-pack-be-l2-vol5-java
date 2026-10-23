@@ -1,5 +1,13 @@
 package com.loopers.domain.payment;
 
+import com.loopers.domain.order.Order;
+import com.loopers.domain.order.OrderRepository;
+import com.loopers.domain.product.ProductRepository;
+import com.loopers.domain.product.StockReservation;
+import com.loopers.domain.product.StockReservationRepository;
+import com.loopers.support.error.CoreException;
+import com.loopers.support.error.ErrorType;
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -8,8 +16,14 @@ import org.springframework.transaction.annotation.Transactional;
  * ⑥ 결제 시도 문지기(미종결일 때만 종결) → ⑦ 주문 상태(WHERE PAYMENT_PENDING) → ⑧ 예약(WHERE RESERVED, 실패면 재고 1회 복원)
  * 세 단계는 반드시 하나의 트랜잭션 안에 있어야 한다 (설계 5-2).
  */
+@RequiredArgsConstructor
 @Component
 public class PaymentResultService {
+
+    private final PaymentAttemptRepository paymentAttemptRepository;
+    private final OrderRepository orderRepository;
+    private final StockReservationRepository stockReservationRepository;
+    private final ProductRepository productRepository;
 
     /**
      * ⑥⑦⑧ 을 한 TX 로 실행한다.
@@ -18,7 +32,29 @@ public class PaymentResultService {
      */
     @Transactional
     public boolean applyFinal(Long attemptId, PaymentFinalResult result) {
-        throw new UnsupportedOperationException("1단계 미구현");
+        PaymentAttempt attempt = paymentAttemptRepository.findById(attemptId)
+            .orElseThrow(() -> new CoreException(ErrorType.NOT_FOUND, "[id = " + attemptId + "] 결제 시도를 찾을 수 없습니다."));
+
+        int settled = paymentAttemptRepository.settleIfOpen(
+            attemptId, result.status(), result.failureReason(), result.transactionKey());
+        if (settled == 0) {
+            return false;
+        }
+
+        if (result.isSuccess()) {
+            orderRepository.finishIfPaymentPending(attempt.getOrderId(), Order.OrderStatus.CONFIRMED, attempt.getAmount());
+        } else {
+            orderRepository.finishIfPaymentPending(attempt.getOrderId(), Order.OrderStatus.PAYMENT_FAILED, 0L);
+        }
+
+        for (StockReservation reservation : stockReservationRepository.findAllByOrderId(attempt.getOrderId())) {
+            if (result.isSuccess()) {
+                stockReservationRepository.consumeIfReserved(reservation.getId());
+            } else if (stockReservationRepository.releaseIfReserved(reservation.getId()) == 1) {
+                productRepository.restoreStock(reservation.getProductId(), reservation.getQuantity());
+            }
+        }
+        return true;
     }
 
     /**
@@ -28,7 +64,7 @@ public class PaymentResultService {
      */
     @Transactional
     public int recordPending(Long attemptId, String transactionKey) {
-        throw new UnsupportedOperationException("1단계 미구현");
+        return paymentAttemptRepository.markPendingIfNotSettled(attemptId, transactionKey);
     }
 
     /**
@@ -38,6 +74,6 @@ public class PaymentResultService {
      */
     @Transactional
     public int recordUnknown(Long attemptId) {
-        throw new UnsupportedOperationException("1단계 미구현");
+        return paymentAttemptRepository.markUnknownIfRequested(attemptId);
     }
 }

@@ -10,11 +10,24 @@ public record PaymentFinalResult(
     String transactionKey
 ) {
 
+    public PaymentFinalResult {
+        if (status == null || !status.isTerminal()) {
+            throw new IllegalArgumentException("최종 결과는 SUCCESS 또는 FAILED 여야 한다: " + status);
+        }
+        if (status == PaymentAttempt.Status.FAILED && failureReason == null) {
+            throw new IllegalArgumentException("FAILED 에는 실패 사유가 필요하다.");
+        }
+    }
+
     public static PaymentFinalResult success(String transactionKey) {
         return new PaymentFinalResult(PaymentAttempt.Status.SUCCESS, null, transactionKey);
     }
 
     public static PaymentFinalResult failed(PaymentAttempt.FailureReason failureReason, String transactionKey) {
         return new PaymentFinalResult(PaymentAttempt.Status.FAILED, failureReason, transactionKey);
+    }
+
+    public boolean isSuccess() {
+        return status == PaymentAttempt.Status.SUCCESS;
     }
 }

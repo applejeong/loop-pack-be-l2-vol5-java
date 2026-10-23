@@ -83,4 +83,16 @@ public class PaymentAttempt extends BaseEntity {
     public static String providerOrderIdOf(Long orderId) {
         return String.format(PROVIDER_ORDER_ID_FORMAT, orderId);
     }
+
+    public boolean hasAttemptKey(String attemptKey) {
+        return this.attemptKey.equals(attemptKey);
+    }
+
+    /**
+     * "같은 요청" 비교 기준은 금액 + cardType 이다. 카드 번호는 비교하지도 저장하지도 않는다 (설계 4-4).
+     * 주문 ID 는 이 시도가 그 주문의 시도라는 사실로 이미 같다.
+     */
+    public boolean isSameRequest(long amount, String cardType) {
+        return this.amount == amount && this.cardType.equals(cardType);
+    }
 }

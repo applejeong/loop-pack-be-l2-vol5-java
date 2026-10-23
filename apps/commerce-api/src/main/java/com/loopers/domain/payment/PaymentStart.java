@@ -9,4 +9,21 @@ public record PaymentStart(Kind kind, Long attemptId, String providerOrderId, lo
     public enum Kind {
         STARTED, EXISTING
     }
+
+    public static PaymentStart started(PaymentAttempt attempt) {
+        return of(Kind.STARTED, attempt);
+    }
+
+    public static PaymentStart existing(PaymentAttempt attempt) {
+        return of(Kind.EXISTING, attempt);
+    }
+
+    public boolean isStarted() {
+        return kind == Kind.STARTED;
+    }
+
+    private static PaymentStart of(Kind kind, PaymentAttempt attempt) {
+        return new PaymentStart(
+            kind, attempt.getId(), attempt.getProviderOrderId(), attempt.getAmount(), attempt.getCardType());
+    }
 }
