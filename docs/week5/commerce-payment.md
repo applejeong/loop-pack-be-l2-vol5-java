@@ -49,8 +49,8 @@
 | PG 생성 요청·관찰 결과·거래 | `PaymentCreateCommand`, `PaymentCreateResult(outcome ACCEPTED/REJECTED_NO_EFFECT/UNKNOWN)`, `PaymentTransaction` | **신규** (포트의 입출력. 카드 번호는 `toString` 에서 가린다) |
 | confirm 응답 재료 | `OrderConfirmInfo(order, attemptStatus, settled, lookupUnavailable)` | **신규** (`settled` 로 202/200 을 가른다. `lookupUnavailable` 은 2단계 reconcile 용, confirm 은 항상 false) |
 | PG 조회 관찰 결과 | `PaymentLookupResult(outcome FOUND/UNAVAILABLE, transactions)` | **신규** (2단계. 목록·단건 조회 공통 반환형. 단건 404 는 FOUND + 0건, timeout·4단계 회로 차단은 UNAVAILABLE. 7-3 참조) |
-| PG 포트 운영 껍데기 | `UnavailablePaymentGateway` (infrastructure, 호출 시 `IllegalStateException`) | **신규** (3단계-B 에서 `HttpPaymentGateway` 로 교체·삭제. 1-6 결정 ㉓ 참조) |
-| PG 실제 HTTP adapter | `HttpPaymentGateway` (infrastructure. `RestClient` + JDK `HttpClient` 를 안에서 조립) | **신규** (3단계-A 껍데기, 3단계-B 에서 구현·`@Component` 등록. 1-6 결정 ㉑ 참조) |
+| PG 포트 운영 껍데기 | `UnavailablePaymentGateway` | 1·2단계에만 있었음. 3단계-B 에서 `HttpPaymentGateway` 로 교체하며 **삭제함** (1-6 결정 ㉓) |
+| PG 실제 HTTP adapter | `HttpPaymentGateway` (infrastructure `@Component`. `RestClient` + JDK `HttpClient` 를 안에서 조립, HTTP/1.1·프록시 없음) | **신규** (3단계-B 구현. 1-6 결정 ㉑ 참조) |
 | PG adapter 설정값 | `PaymentGatewayProperties` ← `payment.pg.*` (`enabled`, `base-url`, `callback-url`, `user-id`, `connect-timeout`, `read-timeout`) | **신규** (3단계. 1-6 결정 ㉒·㉓·㉔ 참조) |
 | create 응답의 불일치 표시 | `PaymentCreateResult.conflictReason`, `unknownWithConflict(reason)` | **신규** (3단계. UNKNOWN + 충돌 사유. 1-6 결정 ⑱·㉕ 참조) |
 | 계약 테스트용 PG 서버 | `TestPaymentPgServer` (테스트 소스, JDK `HttpServer`) | **신규** (3단계. 1-6 결정 ㉖ 참조) |
