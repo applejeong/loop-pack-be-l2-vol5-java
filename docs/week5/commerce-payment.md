@@ -1,7 +1,7 @@
 # 5주차 설계 · 포인트 결제 → 로컬 테스트 PG 교체
 
 - 이 문서 범위: 0장 이름 대조표 · 1장 트랜잭션 경계(예약 저장 형태, 결제 시도 식별자, create 응답 매핑 포함) · 2장 동시성 방식 · 3장 발송 시작 기록 · 4장 같은 주문의 confirm 재요청(202·200 응답 본문 포함) · 5장 PG 성공 뒤 내부 저장(TX B) 실패 · 6장 조율 위치 · 7장 PG 조회 결과가 0건·2건 이상·불일치일 때 · 8장 상태 모델(결제 시도·주문·예약 상태 전이) · 부록 결정 필요(현재 없음)
-- 이 문서 범위 밖: PG adapter의 HTTP 요청·응답 매핑 세부, circuit breaker·retry 수치, 테스트 구성. 과제 2·5·6장에 해당하며 별도 문서로 다룬다. callback·reconcile 의 상세 계약은 이 문서에서 정했다. 조율 위치는 6장, 202·200 응답 모양은 4-6, callback 입구 검사·인증은 7-5 결정 ⑲, reconcile 입구 검사·조회 실패 응답은 5-6 결정 ⑳, 스케줄러의 조회 한도 계산 범위·설정값은 5-3 결정 ⑫다. 3단계 HTTP adapter 의 클라이언트·고정 설정·timeout 자리·202 불일치·계약 테스트 방식은 1-6 결정 ㉑~㉖에서 정했다. 요청·응답 매핑 세부와 circuit breaker·retry 수치는 여전히 범위 밖이다.
+- 이 문서 범위 밖: PG adapter의 HTTP 요청·응답 매핑 세부, circuit breaker·retry 수치, 테스트 구성. 과제 2·5·6장에 해당하며 별도 문서로 다룬다. callback·reconcile 의 상세 계약은 이 문서에서 정했다. 조율 위치는 6장, 202·200 응답 모양은 4-6, callback 입구 검사·인증은 7-5 결정 ⑲, reconcile 입구 검사·조회 실패 응답은 5-6 결정 ⑳, 스케줄러의 조회 한도 계산 범위·설정값은 5-3 결정 ⑫다. 3단계 HTTP adapter 의 클라이언트·고정 설정·timeout 자리·202 불일치·계약 테스트 방식은 1-6 결정 ㉑~㉖에서, 4단계의 timeout 값·서킷브레이커(위치·실패 기준·차단 구분·숫자)·재조회 없음은 5-7 결정 ㉗~㉜에서 정했다. 요청·응답 매핑 세부는 여전히 범위 밖이다.
 - 표기 규칙: **과제 근거**는 원문 섹션명과 문장을 인용한다. **판단:** 은 과제가 정하지 않아 내가 고른 것이다. **결정 필요** 는 이 문서에서 정하지 않고 선택지만 남긴 것이다.
 
 ---
@@ -49,6 +49,8 @@
 | PG 생성 요청·관찰 결과·거래 | `PaymentCreateCommand`, `PaymentCreateResult(outcome ACCEPTED/REJECTED_NO_EFFECT/UNKNOWN)`, `PaymentTransaction` | **신규** (포트의 입출력. 카드 번호는 `toString` 에서 가린다) |
 | confirm 응답 재료 | `OrderConfirmInfo(order, attemptStatus, settled, lookupUnavailable)` | **신규** (`settled` 로 202/200 을 가른다. `lookupUnavailable` 은 2단계 reconcile 용, confirm 은 항상 false) |
 | PG 조회 관찰 결과 | `PaymentLookupResult(outcome FOUND/UNAVAILABLE, transactions)` | **신규** (2단계. 목록·단건 조회 공통 반환형. 단건 404 는 FOUND + 0건, timeout·4단계 회로 차단은 UNAVAILABLE. 7-3 참조) |
+| 조회 불가 이유 | `PaymentLookupResult.UnavailableReason` (`CALL_FAILED` 호출 실패 / `CIRCUIT_OPEN` 서킷 차단) | **신규** (4단계. 스케줄러가 차단 주기를 세지 않기 위해 구분. 5-7 결정 ㉙ 참조) |
+| PG 조회 서킷 설정값 | `payment.pg.circuit-breaker.*` (표본 방식·크기, 최소 호출 수, 실패율, OPEN 대기, HALF_OPEN 시험 호출 수) | **신규** (4단계. `resilience4j-circuitbreaker` core 모듈을 `HttpPaymentGateway` 안에서 코드로 감싼다. 5-7 결정 ㉛·㉜ 참조) |
 | PG 포트 운영 껍데기 | `UnavailablePaymentGateway` | 1·2단계에만 있었음. 3단계-B 에서 `HttpPaymentGateway` 로 교체하며 **삭제함** (1-6 결정 ㉓) |
 | PG 실제 HTTP adapter | `HttpPaymentGateway` (infrastructure `@Component`. `RestClient` + JDK `HttpClient` 를 안에서 조립, HTTP/1.1·프록시 없음) | **신규** (3단계-B 구현. 1-6 결정 ㉑ 참조) |
 | PG adapter 설정값 | `PaymentGatewayProperties` ← `payment.pg.*` (`enabled`, `base-url`, `callback-url`, `user-id`, `connect-timeout`, `read-timeout`) | **신규** (3단계. 1-6 결정 ㉒·㉓·㉔ 참조) |
@@ -772,6 +774,93 @@ PG 에는 성공한 거래가 남아 있고 내부에는 아무 흔적이 없다
 
 **남은 한계.** 회로가 CLOSED 인 동안은 사용자 연타 수만큼 PG 조회가 나간다. 운영이라면 사용자별 호출 제한이 필요하다. 7-8 에도 적었다.
 
+### 5-7. timeout·서킷브레이커·재조회 (확정 · **4단계에서 구현**)
+
+4단계는 PG 조회 경로의 보호 장치다. 3단계가 자리만 두었던 timeout 값을 확정하고, 조회에 서킷브레이커를 붙이며, 자동 재조회는 두지 않는다. 결제 결과 판정(7장)과 상태 전이(8장)는 바뀌지 않는다. 어떤 보호 장치도 결과를 `FAILED` 로 바꾸거나 새 결제를 만들지 않는다.
+
+> **과제 근거** (5. callback·조회·회복 전략)
+> "Timeout·fallback: 실제 PG HTTP 연결·응답 대기를 제한하고, 조회 실패·회로 차단에는 저장된 상태와 확인 불가를 반환합니다. 금액 0·가짜 성공·포인트 대체 결제로 바꾸지 않습니다."
+> "Circuit breaker: PG 조회 한 경로에 적용하고 CLOSED→OPEN→HALF_OPEN→회복 또는 재차단을 확인합니다. 최소 표본·실패 조건·대기·탐색 호출 수를 정합니다. OPEN 동안 실제 외부 조회가 차단돼도 결제 결과를 FAILED로 확정하지 않습니다."
+> "제한된 재조회: 조회 횟수·간격·총 대기 예산을 정합니다. 자동 retry를 추가하면 조회에만 적용하고 실제 호출 수를 검증합니다. create 자동 재시도는 하지 않습니다. 상시 스케줄러는 선택이며 수동 reconcile이 기본 복구 경로입니다."
+
+> **과제 근거** (6. 결정적 검증과 제출)
+> "timeout·회로 OPEN·복구 대기·호출 수 제한, 기존 상태 유지, 회복 뒤 조회 재개"
+
+#### 결정 ㉗ 서킷브레이커 위치 (확정)
+
+`HttpPaymentGateway` 안쪽, HTTP 호출 바로 바깥에 둔다. **조회(목록·단건)에만** 적용하고 두 조회가 서킷 하나를 같이 쓴다. create 에는 적용하지 않는다.
+
+**판단:** adapter 는 네트워크 예외를 밖으로 던지지 않고 `UNAVAILABLE` 결과로 바꿔 돌려준다 (3단계 결정). 서킷을 adapter 바깥(Facade)에 두면 예외가 없으니 실패를 볼 수 없어 영원히 열리지 않는다. 실패가 보이는 유일한 자리는 HTTP 호출을 직접 감싸는 지점이다. 목록·단건 조회는 같은 PG 의 같은 경로라 건강 상태가 하나이므로 서킷도 하나다. create 는 과제가 "PG 조회 한 경로에 적용" 이라 정했고, create 의 timeout·실패는 이미 `UNKNOWN` + 조회 경로로 넘어가므로 차단이 추가로 지키는 것이 없다.
+
+기각: adapter 바깥에서 `UNAVAILABLE` 결과를 실패로 세도록 서킷을 설정. 설정이 복잡해지고, 바깥 계층이 adapter 의 결과 타입을 해석해야 한다.
+
+#### 결정 ㉘ 실패 기준 (확정)
+
+| 조회 결과 | 서킷 표본 |
+|---|---|
+| timeout, 연결 거부, 5xx, 잘못된 JSON | 실패 |
+| 200 목록, 빈 목록, 단건 404 | 성공 |
+
+**판단:** "내역 없음" 은 PG 가 정상적으로 답한 것이다. 실패로 세면 create 응답 유실·미생성 거래(3장 "호출 전 사망")를 조회하는 것만으로 서킷이 열려, 멀쩡한 PG 를 장애로 오판한다. 7-4 의 "0건은 단순 미확인" 과 같은 선이다.
+
+#### 결정 ㉙ 차단 구분과 입구별 처리 (확정)
+
+`PaymentLookupResult` 의 `UNAVAILABLE` 에 이유(`PaymentLookupResult.UnavailableReason`, **신규**. `CALL_FAILED` 호출 실패 / `CIRCUIT_OPEN` 서킷 차단)를 둔다. 세 입구는 결과 타입만 보고 서킷 라이브러리는 모른다.
+
+| 입구 | 서킷 차단(`CIRCUIT_OPEN`) 처리 |
+|---|---|
+| 스케줄러 | 조회 횟수(`lookupCount`)·`nextLookupAt` 을 올리지 않고 **그 주기를 중단**한다. 5-3 결정 ⑫ 의 "서킷 OPEN 으로 건너뛴 주기는 세지 않는다" 의 구현이다. 다음 주기에 다시 시도한다 |
+| reconcile | 조회 실패와 같다. 202 + 저장 상태 + `lookupUnavailable=true` (5-6 결정 ⑳ 순서 5′) |
+| callback | 조회 실패와 같다. 5xx, 상태 불변 (7-5 결정 ⑬) |
+
+**판단:** 스케줄러만 차단을 구분해야 한다. 차단된 주기에 대상 전부의 `lookupCount` 를 올리면 PG 장애 동안 한도가 소진되어 회복 뒤 아무도 조회하지 않는다 (5-3 의 "서킷 OPEN" 판단). 한 건이 차단이면 같은 서킷을 쓰는 나머지도 차단이므로 주기를 끝내는 것이 맞다. reconcile·callback 은 호출자에게 "지금은 확인 불가" 라는 같은 사실을 알리면 되므로 구분이 필요 없다.
+
+기각: Facade 가 서킷 상태를 직접 확인. application 계층이 Resilience4j 를 알게 되고, 상태 조회와 실제 호출 사이에 상태가 바뀌는 틈이 생긴다.
+
+#### 결정 ㉚ 자동 재조회(retry) 없음 (확정)
+
+조회에 즉시 재시도를 넣지 않는다. 재조회는 스케줄러(5-3 결정 ⑫)와 사용자 reconcile(5-6 결정 ⑳)이 맡는다. create 는 어떤 경우에도 재시도하지 않는다 (3장, 결정 ㉑ 유지).
+
+> **과제 근거** (Java·Kotlin · 클라이언트와 회복 도구 연결)
+> "조회 retry와 circuit breaker를 중첩하면 어느 호출을 실패 표본으로 세는지 확인합니다."
+
+**판단:** 과제가 자동 retry 를 선택 사항("추가하면")으로 두었다. 스케줄러가 이미 횟수·간격·한도를 가진 제한된 재조회라, 즉시 재시도까지 넣으면 같은 일을 두 겹으로 하고 서킷 표본 계산(재시도 3회 중 1회 성공은 실패 2회인가 성공 1회인가)이 복잡해진다. 실패한 조회의 다음 기회는 어차피 30초 뒤 스케줄러 주기나 사용자의 다음 reconcile 이다.
+
+기각: 조회에 짧은 retry 1~2회. 사용자 체감 지연이 늘고, 표본 계산을 따로 정해야 한다.
+
+#### 결정 ㉛ 붙이는 방식 (확정)
+
+Resilience4j 의 core 모듈 `resilience4j-circuitbreaker` 만 의존성에 추가하고, `HttpPaymentGateway` 안에서 `CircuitBreaker.decorateSupplier` 같은 decorator 로 **코드로 직접 감싼다.** 애너테이션(`@CircuitBreaker`)·AOP·Spring Boot 스타터는 쓰지 않는다. 버전은 Spring Boot 3 / JDK 21 에 맞는 것을 의존성 관리(`gradle` 버전 카탈로그 또는 `build.gradle.kts` 의 명시 버전)에 적는다.
+
+> **과제 근거** (Java·Kotlin · 클라이언트와 회복 도구 연결)
+> "Resilience4j를 선택하면 현재 Spring Boot 3/JDK 21에 맞는 모듈·버전을 의존성 관리에 명시합니다. 스타터에 이미 설치돼 있다고 가정하지 않습니다."
+> "직접 decorator를 연결하거나 Spring integration을 사용합니다. annotation 방식이면 필요한 AOP 연결·자기 호출·실제 proxy 적용을 확인합니다."
+
+**판단:** AOP 프록시·자기 호출 함정이 없고, 어느 호출이 감싸였는지 코드에 그대로 드러나 계약 테스트(결정 ㉖ 의 서버 재사용)로 CLOSED→OPEN→HALF_OPEN 을 바로 검증할 수 있다. 결정 ㉗ 이 "HTTP 호출 바로 바깥" 을 요구하므로 메서드 단위 애너테이션으로는 자리를 맞추기도 어렵다.
+
+기각: `@CircuitBreaker` 애너테이션 + 스타터. AOP 연결·자기 호출·프록시 적용 여부를 따로 확인해야 하고, 의존성이 스타터·AOP 까지 늘어난다.
+
+#### 결정 ㉜ 숫자 (확정 · 운영 기본값)
+
+전부 설정값으로 둔다. timeout 은 3단계의 `payment.pg.connect-timeout`·`read-timeout` 을 그대로 쓰고 임시값을 확정한다. 서킷 설정은 `payment.pg.circuit-breaker.*`(**신규**) 아래에 둔다. 키 이름은 Resilience4j 의 설정 이름을 따른다.
+
+| 설정 | 값 | 고른 이유 |
+|---|---|---|
+| 연결 timeout (`connect-timeout`) | 1초 | 로컬 PG(127.0.0.1) 연결은 수십 ms 다. 1초가 지나도 안 되면 프로세스가 없거나 멈춘 것이라 더 기다릴 이유가 없다 |
+| 응답 timeout (`read-timeout`) | 3초 | 테스트 PG 의 응답은 보통 1초 안이다. 3초는 confirm 요청 스레드가 PG 때문에 묶이는 시간의 상한이다 |
+| 표본 방식 (`sliding-window-type`) | COUNT (최근 N회 호출) | 조회는 보조 경로라 호출이 드물다. 시간 창으로는 표본이 안 모여 서킷이 판단을 못 한다 |
+| 표본 크기 (`sliding-window-size`) | 10 | 스케줄러 한두 주기 + 사용자 몇 번의 reconcile 정도다. 더 크면 장애 감지가 늦고, 더 작으면 한두 번의 우연에 흔들린다 |
+| 최소 호출 수 (`minimum-number-of-calls`) | 5 | 1~2회 실패만으로 열리지 않게 한다. 5회 중 3회 실패가 첫 OPEN 조건이다 |
+| 실패율 기준 (`failure-rate-threshold`) | 50% | 절반이 실패하면 간헐 오류가 아니라 PG 장애로 본다 |
+| OPEN 대기 (`wait-duration-in-open-state`) | 10초 | 스케줄러 주기(30초)보다 짧아, 차단된 다음 주기에는 HALF_OPEN 시험이 가능하다. 사용자 reconcile 도 10초 뒤면 다시 실제 조회를 받는다 |
+| HALF_OPEN 시험 호출 (`permitted-number-of-calls-in-half-open-state`) | 2회 | 한 번의 운으로 닫히지 않게 하되, 시험을 오래 끌지도 않는다 |
+
+테스트 설정은 표본·대기를 작게 두어 CLOSED→OPEN→HALF_OPEN→회복·재차단을 짧은 테스트로 확인한다.
+
+**판단:** 위 숫자는 실측 근거가 없는 초기값이다. 로컬 테스트 PG 의 응답 특성과 스케줄러 주기(30초)·min-age(60초)와 어긋나지 않는 선에서 골랐다.
+
+**남은 한계.** 서킷·timeout 숫자는 운영에서 PG 응답 시간·실패율 지표를 보고 조정해야 한다. 서킷은 인스턴스마다 따로 열리고 닫힌다. 다중 인스턴스에서는 한 인스턴스가 열려도 다른 인스턴스는 계속 조회한다 (5-3 의 다중 인스턴스 한계와 같은 선). 7-8 에도 적었다.
+
 ---
 
 ## 6. 조율 위치 (확정)
@@ -988,6 +1077,8 @@ reconcile 입구도 같은 표를 따르되, 응답은 다르다. 과제가 reco
 callback 은 보낸 쪽을 인증하지 않는다 (7-5 결정 ⑲). 결과는 권위 조회가 지키지만, 조작된 알림이 PG 조회를 유발하는 것은 막지 못한다. 운영이라면 서명 검증이 필요하다.
 
 reconcile 은 연타 제한이 없다 (5-6 결정 ⑳). 회로가 CLOSED 인 동안은 연타 수만큼 PG 조회가 나간다. 운영이라면 사용자별 호출 제한이 필요하다.
+
+서킷·timeout 숫자(5-7 결정 ㉜)는 실측 근거가 없는 초기값이다. 운영에서는 PG 응답 시간·실패율 지표를 보고 조정한다. 서킷은 인스턴스별로 따로 열리고 닫힌다.
 
 ---
 
