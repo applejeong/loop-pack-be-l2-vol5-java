@@ -1,6 +1,5 @@
 package com.loopers.domain.payment;
 
-import java.util.List;
 import java.util.Optional;
 
 /**
@@ -15,9 +14,9 @@ public interface PaymentGateway {
     PaymentCreateResult create(PaymentCreateCommand command);
 
     /**
-     * 같은 주문(providerOrderId)의 거래 목록. 빈 목록도 표현한다.
+     * 같은 주문(providerOrderId)의 거래 목록 조회. 빈 목록(FOUND + 0건)과 조회 실패(UNAVAILABLE)를 구분한다.
      */
-    List<PaymentTransaction> findAllByOrderId(String providerOrderId);
+    PaymentLookupResult findAllByOrderId(String providerOrderId);
 
     /**
      * 거래 단건 조회. 없으면 empty.

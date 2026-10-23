@@ -1,5 +1,7 @@
 package com.loopers.domain.payment;
 
+import java.time.ZonedDateTime;
+import java.util.List;
 import java.util.Optional;
 
 public interface PaymentAttemptRepository {
@@ -33,4 +35,29 @@ public interface PaymentAttemptRepository {
      * @return 갱신된 행 수
      */
     int markUnknownIfRequested(Long attemptId);
+
+    /**
+     * callback 본문의 providerOrderId 로 시도를 찾는다 (설계 7-5 결정 ⑲ 순서 1).
+     */
+    Optional<PaymentAttempt> findByProviderOrderId(String providerOrderId);
+
+    /**
+     * 스케줄러 조회 대상 (설계 5-3 결정 ⑫). 미종결이고, 수동 확인 대상이 아니며,
+     * 마지막 변경(updatedAt)이 updatedBefore 이전이고, nextLookupAt 이 없거나 now 이전인 시도.
+     */
+    List<PaymentAttempt> findAllOpenDueForLookup(ZonedDateTime updatedBefore, ZonedDateTime now);
+
+    /**
+     * 충돌 기록 (설계 7-2). 상태 컬럼은 건드리지 않으므로 ⑥ 문지기를 거치지 않는다.
+     *
+     * @return 갱신된 행 수
+     */
+    int recordConflict(Long attemptId, PaymentAttempt.ConflictReason reason, ZonedDateTime at);
+
+    /**
+     * 스케줄러가 PG 에 물어본 뒤 lookup_count = lookup_count + 1, next_lookup_at, manual_check_required 를 한 UPDATE 로 기록한다.
+     *
+     * @return 갱신된 행 수
+     */
+    int recordLookup(Long attemptId, ZonedDateTime nextLookupAt, boolean manualCheckRequired);
 }

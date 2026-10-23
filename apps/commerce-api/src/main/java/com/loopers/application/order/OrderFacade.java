@@ -75,7 +75,7 @@ public class OrderFacade {
         Order order = orderService.getOrderWithItems(orderId);
         PaymentAttempt attempt = paymentAttemptRepository.findByOrderId(orderId)
             .orElseThrow(() -> new CoreException(ErrorType.NOT_FOUND, "[orderId = " + orderId + "] 결제 시도를 찾을 수 없습니다."));
-        return new OrderConfirmInfo(OrderInfo.from(order), attempt.getStatus().name(), attempt.getStatus().isTerminal());
+        return new OrderConfirmInfo(OrderInfo.from(order), attempt.getStatus().name(), attempt.getStatus().isTerminal(), false);
     }
 
     /**

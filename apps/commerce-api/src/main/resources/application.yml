@@ -29,11 +29,38 @@ springdoc:
   swagger-ui:
     path: /swagger-ui.html
 
+# 미확인 결제 시도의 스케줄러 조회 (설계 5-3 결정 ⑫). 기간은 ISO-8601 (PT30S = 30초, PT1M = 1분).
+payment:
+  lookup:
+    enabled: true          # false 면 스케줄러 빈은 만들고 자동 실행만 끈다
+    fixed-delay: PT30S     # 실행 주기
+    min-age: PT60S         # 마지막 변경 후 이 시간이 지난 시도만 대상
+    initial-interval: PT1M # 첫 조회 뒤 다음 조회까지
+    multiplier: 2          # 조회마다 간격에 곱하는 배수
+    max-interval: PT30M    # 간격 상한
+    max-lookups: 10        # 최대 조회 횟수. 도달하면 수동 확인 필요
+
 ---
 spring:
   config:
     activate:
       on-profile: local, test
+
+---
+# 테스트는 자동 실행을 끄고 Facade 메서드를 직접 호출한다. 간격 0·한도 2 로 "한도 소진 → 수동 확인 필요"를 짧게 확인한다.
+spring:
+  config:
+    activate:
+      on-profile: test
+
+payment:
+  lookup:
+    enabled: false
+    min-age: PT0S
+    initial-interval: PT0S
+    multiplier: 1
+    max-interval: PT0S
+    max-lookups: 2
 
 ---
 server:

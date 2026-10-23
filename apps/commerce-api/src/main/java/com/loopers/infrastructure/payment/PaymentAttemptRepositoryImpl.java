@@ -8,6 +8,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
 import java.time.ZonedDateTime;
+import java.util.List;
 import java.util.Optional;
 
 import static com.loopers.domain.payment.QPaymentAttempt.paymentAttempt;
@@ -90,5 +91,25 @@ public class PaymentAttemptRepositoryImpl implements PaymentAttemptRepository {
                 paymentAttempt.status.eq(PaymentAttempt.Status.REQUESTED)
             )
             .execute();
+    }
+
+    @Override
+    public Optional<PaymentAttempt> findByProviderOrderId(String providerOrderId) {
+        return paymentAttemptJpaRepository.findByProviderOrderId(providerOrderId);
+    }
+
+    @Override
+    public List<PaymentAttempt> findAllOpenDueForLookup(ZonedDateTime updatedBefore, ZonedDateTime now) {
+        throw new UnsupportedOperationException("2단계 미구현");
+    }
+
+    @Override
+    public int recordConflict(Long attemptId, PaymentAttempt.ConflictReason reason, ZonedDateTime at) {
+        throw new UnsupportedOperationException("2단계 미구현");
+    }
+
+    @Override
+    public int recordLookup(Long attemptId, ZonedDateTime nextLookupAt, boolean manualCheckRequired) {
+        throw new UnsupportedOperationException("2단계 미구현");
     }
 }

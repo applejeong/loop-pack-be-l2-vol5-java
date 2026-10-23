@@ -3,7 +3,9 @@ package com.loopers.infrastructure.payment;
 import com.loopers.domain.payment.PaymentCreateCommand;
 import com.loopers.domain.payment.PaymentCreateResult;
 import com.loopers.domain.payment.PaymentGateway;
+import com.loopers.domain.payment.PaymentLookupResult;
 import com.loopers.domain.payment.PaymentTransaction;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.Comparator;
 import java.util.List;
@@ -32,7 +34,11 @@ public class FakePaymentGateway implements PaymentGateway {
     private static final String TRANSACTION_KEY_FORMAT = "FAKE-TX-%06d";
 
     private volatile NextCreate nextCreate = NextCreate.ACCEPT_PENDING;
+    private volatile boolean failLookups;
+    private volatile String throwOnLookupOf;
+    private volatile boolean lookupSeenInsideTransaction;
     private final AtomicInteger createCount = new AtomicInteger();
+    private final AtomicInteger lookupCallCount = new AtomicInteger();
     private final AtomicLong sequence = new AtomicLong();
     private final ConcurrentMap<String, PaymentTransaction> transactions = new ConcurrentHashMap<>();
 
@@ -48,8 +54,36 @@ public class FakePaymentGateway implements PaymentGateway {
         nextCreate = NextCreate.CREATE_BUT_LOSE_RESPONSE;
     }
 
+    /**
+     * 이후 목록 조회가 전부 UNAVAILABLE(timeout·회로 차단 흉내)이 된다. 거래는 그대로 있다.
+     */
+    public void willFailLookups() {
+        failLookups = true;
+    }
+
+    /**
+     * 특정 주문의 목록 조회에서만 RuntimeException 을 던진다. "한 건 예외가 다음 건을 막지 않는다" 장면용이며 UNAVAILABLE 과 다르다.
+     */
+    public void willThrowOnLookupOf(String providerOrderId) {
+        throwOnLookupOf = providerOrderId;
+    }
+
     public int createCount() {
         return createCount.get();
+    }
+
+    /**
+     * PG 조회(목록·단건) 호출 횟수. 결제 시도의 lookupCount(스케줄러 조회 횟수)와 다른 값이다.
+     */
+    public int lookupCallCount() {
+        return lookupCallCount.get();
+    }
+
+    /**
+     * 어떤 조회 호출이든 DB 트랜잭션 안에서 들어온 적이 있으면 true. "PG 호출 중 TX 미보유" 장면용.
+     */
+    public boolean lookupSeenInsideTransaction() {
+        return lookupSeenInsideTransaction;
     }
 
     /**
@@ -71,7 +105,11 @@ public class FakePaymentGateway implements PaymentGateway {
 
     public void reset() {
         nextCreate = NextCreate.ACCEPT_PENDING;
+        failLookups = false;
+        throwOnLookupOf = null;
+        lookupSeenInsideTransaction = false;
         createCount.set(0);
+        lookupCallCount.set(0);
         sequence.set(0);
         transactions.clear();
     }
@@ -90,15 +128,30 @@ public class FakePaymentGateway implements PaymentGateway {
     }
 
     @Override
-    public List<PaymentTransaction> findAllByOrderId(String providerOrderId) {
-        return transactions().stream()
+    public PaymentLookupResult findAllByOrderId(String providerOrderId) {
+        observeLookup();
+        if (providerOrderId.equals(throwOnLookupOf)) {
+            throw new IllegalStateException("테스트: 가짜 PG 조회 예외 " + providerOrderId);
+        }
+        if (failLookups) {
+            return PaymentLookupResult.unavailable();
+        }
+        return PaymentLookupResult.found(transactions().stream()
             .filter(transaction -> transaction.providerOrderId().equals(providerOrderId))
-            .toList();
+            .toList());
     }
 
     @Override
     public Optional<PaymentTransaction> findByTransactionKey(String transactionKey) {
+        observeLookup();
         return Optional.ofNullable(transactions.get(transactionKey));
+    }
+
+    private void observeLookup() {
+        lookupCallCount.incrementAndGet();
+        if (TransactionSynchronizationManager.isActualTransactionActive()) {
+            lookupSeenInsideTransaction = true;
+        }
     }
 
     private PaymentTransaction store(PaymentCreateCommand command) {

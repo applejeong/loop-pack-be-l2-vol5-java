@@ -47,7 +47,8 @@
 | TX B 비종결 기록 | `PaymentResultService.recordPending(attemptId, transactionKey)`, `recordUnknown(attemptId)` | **신규** (⑥만 실행) |
 | 합성 카드 입력 | `PaymentCard(cardType, cardNo)` | **신규** (허용 목록: cardType `TEST`, 번호 `0000-0000-0000-0000`. 그 외 `BAD_REQUEST`) |
 | PG 생성 요청·관찰 결과·거래 | `PaymentCreateCommand`, `PaymentCreateResult(outcome ACCEPTED/REJECTED_NO_EFFECT/UNKNOWN)`, `PaymentTransaction` | **신규** (포트의 입출력. 카드 번호는 `toString` 에서 가린다) |
-| confirm 응답 재료 | `OrderConfirmInfo(order, attemptStatus, settled)` | **신규** (`settled` 로 202/200 을 가른다) |
+| confirm 응답 재료 | `OrderConfirmInfo(order, attemptStatus, settled, lookupUnavailable)` | **신규** (`settled` 로 202/200 을 가른다. `lookupUnavailable` 은 2단계 reconcile 용, confirm 은 항상 false) |
+| PG 조회 관찰 결과 | `PaymentLookupResult(outcome FOUND/UNAVAILABLE, transactions)` | **신규** (2단계. `PaymentGateway.findAllByOrderId` 의 반환형. timeout·4단계 회로 차단은 UNAVAILABLE) |
 | PG 포트 운영 껍데기 | `UnavailablePaymentGateway` (infrastructure, 호출 시 `IllegalStateException`) | **신규** (3단계에서 실제 HTTP adapter 로 교체·삭제) |
 | 테스트 전용 가짜 PG | `FakePaymentGateway` + `FakePaymentGatewayConfig`(`@TestConfiguration`, `@Primary`) | **신규** (테스트 소스. `@Import` 한 테스트에서만 등록) |
 | 스케줄러 조회 설정값 | `payment.lookup.*` (`@ConfigurationProperties`. 등록은 기존 `@ConfigurationPropertiesScan` 이 맡는다) | **신규** (2단계. 5-3 결정 ⑫ 설정값 표 참조) |
@@ -299,7 +300,9 @@ create 응답에서 `SUCCESS` 는 오지 않는다. 과제 계약이 생성 수�
 
 기각: "`FAILED` 인데 `transactionKey` 가 없으면 생성 전 거절"로 추론. 의미가 암묵적이고, `transactionKey` 없이 `FAILED` 가 되는 다른 경로가 생기면 추론이 깨진다.
 
-#### 결정 ⑱ orderId·amount 불일치 422 (확정)
+#### 결정 ⑱ orderId·amount 불일치 422 (확정 · **3단계에서 구현**)
+
+구현 시점: 1·2단계에서는 구현하지 않았다. 충돌 컬럼은 2단계에서 생기고, create 응답 본문을 실제로 읽는 HTTP adapter 가 3단계에 생기므로 그때 함께 구현한다.
 
 네 조건 중 `orderId`·`amount` 일치만 어긋난 422 는 `UNKNOWN` 으로 두고 **충돌 표시**(7-2 의 `conflicted`·`conflictReason`·`conflictedAt`)를 함께 기록한다. 예약은 유지한다.
 
@@ -651,7 +654,7 @@ PG 에는 성공한 거래가 남아 있고 내부에는 아무 흔적이 없다
 | 2 | 남의 주문 | 404, 존재를 알리지 않는다 | `NOT_FOUND` (기존. 4-1 의 confirm·`OrderFacade.findOwnOrder` 와 같은 문구) |
 | 3 | 결제 시도가 없는 주문 (`DRAFT`, 이전 POINT 확정 주문) | 404 | `NOT_FOUND` (기존) |
 | 4 | 이미 종결된 시도 (`SUCCESS`·`FAILED`) | **200** + 저장 결과 | 오류 아님 |
-| 5 | 미종결 시도 → PG 목록 조회 (7-3) | 7-6 표를 따른다. 종결되면 200, 종결되지 않으면 202 + 저장 상태, 충돌은 409 | — |
+| 5 | 미종결 시도 → PG 목록 조회 (7-3) | 7-6 표를 따른다. 종결되면 200, 종결되지 않으면 202 + 저장 상태, 충돌은 기록 뒤 202 + 저장 상태 + `lookupUnavailable=true` (7-6 끝의 판단) | — |
 | 5′ | 5 에서 PG 조회 실패 (timeout, 회로 OPEN) | **202** + 저장 상태 + 확인 불가 표시 | 오류 아님 |
 
 > **과제 근거** (3. 기존 주문 확정에 PG 연결)
@@ -862,7 +865,9 @@ adapter 의 `transactionKey` 단건 조회(`GET /api/v1/payments/{transactionKey
 | 저장된 `transactionKey` 가 목록에 없음 | 그대로 | 기록 (사유: 거래 누락) | 그대로 | 유지 | 없음 | 409 `CONFLICT` |
 | 조회 실패 (timeout, 회로 OPEN) | `REQUESTED` 면 `UNKNOWN` 으로 기록 (1장 규칙), `PENDING` 이면 그대로, `UNKNOWN` 이면 그대로 | 없음 | 그대로 | 유지 | 없음 | 5xx (결정 ⑬) |
 
-reconcile 입구도 같은 표를 따르되, 응답은 다르다. 과제가 reconcile 응답을 "저장된 상태와 확인 불가"로 정했으므로(5장 인용) 종결되지 않는 행(reconcile 입구의 0건, 조회 실패, `PENDING` 전이)은 202 + 저장 상태, 충돌 행은 409 다. callback 의 0건이 409 이고 조회 실패가 5xx 인 것과 다른 이유는 결정 ⑬의 판단 열에 있다.
+reconcile 입구도 같은 표를 따르되, 응답은 다르다. 과제가 reconcile 응답을 "저장된 상태와 확인 불가"로 정했으므로(5장 인용) 종결되지 않는 행(reconcile 입구의 0건, 조회 실패, `PENDING` 전이)은 202 + 저장 상태이고, 충돌 행(2건 이상·금액 불일치·저장 key 누락)도 충돌을 기록한 뒤 **202 + 저장 상태 + `lookupUnavailable=true`** 다. 예외를 던지지 않는다. callback 의 0건이 409 이고 조회 실패가 5xx 인 것과 다른 이유는 결정 ⑬의 판단 열에 있다.
+
+**판단 (reconcile 충돌은 409 가 아니라 202):** callback 의 4xx 는 "보낸 쪽이 이상하다"는 뜻인데, reconcile 은 사용자가 잘못 보낸 것이 아니라 PG 데이터가 이상한 경우다. 사용자에게는 "지금은 확인할 수 없다"와 같은 상황으로 보이고, 충돌은 DB 에 남아 사람 확인으로 넘어간다.
 
 ### 7-7. 신규 이름
 

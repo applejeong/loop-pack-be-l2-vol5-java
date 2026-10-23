@@ -8,6 +8,8 @@ import jakarta.persistence.Table;
 import jakarta.persistence.UniqueConstraint;
 import lombok.Getter;
 
+import java.time.ZonedDateTime;
+
 /**
  * 주문당 하나인 PG 결제 시도.
  * 세 식별자를 역할별로 나눠 저장한다: attemptKey(고객 멱등 키), providerOrderId(PG 에 보내는 주문 식별자),
@@ -43,6 +45,15 @@ public class PaymentAttempt extends BaseEntity {
         REJECTED_BEFORE_CREATE, PG_FAILED
     }
 
+    /**
+     * 조회 결과가 "정상 1건 일치"가 아닐 때의 마지막 충돌 사유 (설계 7-2). 상태는 바꾸지 않는다.
+     * NO_TRANSACTION: callback 입구의 조회 0건. MULTIPLE_TRANSACTIONS: 2건 이상.
+     * AMOUNT_MISMATCH·ORDER_MISMATCH: 금액·주문 불일치. TRANSACTION_KEY_MISSING: 알고 있는 transactionKey 가 목록에 없음.
+     */
+    public enum ConflictReason {
+        NO_TRANSACTION, MULTIPLE_TRANSACTIONS, AMOUNT_MISMATCH, ORDER_MISMATCH, TRANSACTION_KEY_MISSING
+    }
+
     private static final String PROVIDER_ORDER_ID_FORMAT = "LP-ORD-%010d";
 
     private Long orderId;
@@ -64,6 +75,25 @@ public class PaymentAttempt extends BaseEntity {
 
     @Enumerated(EnumType.STRING)
     private FailureReason failureReason;
+
+    /**
+     * 스케줄러 조회 추적 (설계 5-3 결정 ⑫). 스케줄러가 실제로 PG 에 물어본 횟수만 센다. 사용자 reconcile 은 세지 않는다.
+     */
+    private int lookupCount;
+
+    private ZonedDateTime nextLookupAt;
+
+    private boolean manualCheckRequired;
+
+    /**
+     * 충돌 기록 (설계 7-2). 상태 컬럼과 별개라 종결 여부와 무관하게 남는다.
+     */
+    private boolean conflicted;
+
+    @Enumerated(EnumType.STRING)
+    private ConflictReason conflictReason;
+
+    private ZonedDateTime conflictedAt;
 
     protected PaymentAttempt() {}
 

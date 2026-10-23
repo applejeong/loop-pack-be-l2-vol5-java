@@ -11,6 +11,8 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.ZonedDateTime;
+
 /**
  * 로컬 TX B. create 응답·callback·reconcile 세 입구가 공유하며, 검증된 PG 결과를 시도·주문·예약에 한 번만 반영한다.
  * ⑥ 결제 시도 문지기(미종결일 때만 종결) → ⑦ 주문 상태(WHERE PAYMENT_PENDING) → ⑧ 예약(WHERE RESERVED, 실패면 재고 1회 복원)
@@ -75,5 +77,21 @@ public class PaymentResultService {
     @Transactional
     public int recordUnknown(Long attemptId) {
         return paymentAttemptRepository.markUnknownIfRequested(attemptId);
+    }
+
+    /**
+     * 충돌 기록 (설계 7-2). 상태·주문·예약은 건드리지 않는다.
+     */
+    @Transactional
+    public void recordConflict(Long attemptId, PaymentAttempt.ConflictReason reason) {
+        throw new UnsupportedOperationException("2단계 미구현");
+    }
+
+    /**
+     * 스케줄러 조회 1회 기록 (설계 5-3 결정 ⑫). 조회 횟수 +1, 다음 조회 시각, 한도 도달 시 수동 확인 표시.
+     */
+    @Transactional
+    public void recordLookup(Long attemptId, ZonedDateTime nextLookupAt, boolean manualCheckRequired) {
+        throw new UnsupportedOperationException("2단계 미구현");
     }
 }

@@ -3,10 +3,10 @@ package com.loopers.infrastructure.payment;
 import com.loopers.domain.payment.PaymentCreateCommand;
 import com.loopers.domain.payment.PaymentCreateResult;
 import com.loopers.domain.payment.PaymentGateway;
+import com.loopers.domain.payment.PaymentLookupResult;
 import com.loopers.domain.payment.PaymentTransaction;
 import org.springframework.stereotype.Component;
 
-import java.util.List;
 import java.util.Optional;
 
 /**
@@ -22,7 +22,7 @@ public class UnavailablePaymentGateway implements PaymentGateway {
     }
 
     @Override
-    public List<PaymentTransaction> findAllByOrderId(String providerOrderId) {
+    public PaymentLookupResult findAllByOrderId(String providerOrderId) {
         throw unavailable();
     }
 
