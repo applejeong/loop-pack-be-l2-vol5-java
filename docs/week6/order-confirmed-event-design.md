@@ -116,6 +116,7 @@
 - 과제 환경은 트래픽이 낮아 동기 대기 비용이 작다.
 - **규칙:** 대기 시간 상한(예: 3초). 발행 실패 예외는 Facade 밖으로 던지지 않고 eventId·orderId와 ERROR 로그로 남긴다. 주문 상태를 되돌리거나 PG를 재호출하지 않는다 (📄 p.3).
 - 참고: "동기"는 Kafka 저장까지만 기다리는 것이며, streamer 처리를 기다리지 않으므로 이벤트 구조의 비동기는 유지된다.
+- send 결과는 세 가지로 구분한다. 성공(metadata 수신), 실패 확정(future 가 예외로 끝남: metadata 대기 max.block.ms 초과·delivery.timeout.ms 소진·직렬화 실패), 미확인(get(3초) 타임아웃. record 는 producer 버퍼에 남아 delivery.timeout.ms 동안 뒤에서 재시도하므로 실제로는 발행될 수 있다). 미확인을 실패로 적으면 "발행 안 됨"으로 오판해 W7 재발행 판단을 그르치므로 로그와 예외(OrderConfirmedPublishException.outcome)에 구분을 담는다.
 
 ### D8. acks → `acks=all` yml에 명시
 - 결제 확정 이벤트라 속도보다 유실 방지를 우선하고, 기본값 의존 대신 명시한다.
