@@ -181,6 +181,7 @@ product_purchase_activity         (품목당 1행)
   > 📄 p.9 "오류 제거 후 같은 group으로 컨테이너를 재시작해 재전달·정상 저장·ack까지 확인합니다."
 - 재시도 총 대기 시간은 `max.poll.interval.ms`(기본 5분)보다 충분히 짧게 잡는다.
 - UNIQUE 위반 외의 DB 오류를 "중복"으로 바꾸지 않는다 (📄 p.4).
+- `DataIntegrityViolationException`은 중복으로 바꾸지 않고 재시도만 한다. 진짜 UNIQUE 경쟁이면 다음 조회에서 no-op, 다른 위반이면 소진 후 중단.
 
 ### D13. 재시도·중단 구현 → 리스너 안에서 직접 재시도 + `CommonContainerStoppingErrorHandler`
 - 과제 예시 handler를 그대로 써서 "실패 record는 건너뛰지 않고 offset이 넘어가지 않는다"를 단순하게 증명한다.
@@ -193,6 +194,7 @@ product_purchase_activity         (품목당 1행)
 - 쓰는 곳이 streamer뿐이고 기존 factory를 바꾸지 않는다.
   > 📄 p.5 "기존 factory를 무조건 전역 변경하지 않습니다."
 - fetch 값(`fetch.min.bytes`, `fetch.max.wait.ms`)을 yml에서 읽고, 테스트 profile에서만 작게 설정한다. 이유: 기존 1MiB·5초 대기로 작은 테스트 메시지가 늦게 보이는 것을 sleep 없이 해결 (📄 p.5).
+- 운영 값은 Kafka 기본값(1바이트·500ms)을 쓴다. record listener라 묶음 이득이 없고 튜닝할 측정 근거가 없어 기본값 사용. 기존 1MiB·5초는 batch listener용 템플릿 값이며, 작은 메시지에선 1MiB 조건 때문에 매번 5초를 기다리게 된다.
 - groupId: `purchase-activity`.
 - `auto.offset.reset=earliest`를 이 factory에서만 지정한다. 이유: 구매 활동 group은 topic에 이미 있는 확정 이벤트도 빠짐없이 읽어야 하고(재처리는 장부로 no-op), 테스트에서 listener 배정 전에 발행한 메시지도 놓치지 않는다. 단점: group을 새로 만들면 retention 안의 과거 이벤트를 한 번 훑는다. 공용 `latest`와 기존 factory는 그대로 둔다.
 
