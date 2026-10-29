@@ -72,16 +72,16 @@ public class ProcessedOrderConfirmation extends BaseEntity {
      * 같은 orderId 의 다른 eventId 또는 같은 eventId 의 다른 fingerprint 면 충돌(영구 오류)이다.
      */
     public void verifySameFact(OrderConfirmedEvent event) {
+        String newFingerprint = event.fingerprint();
         if (!this.eventId.equals(event.eventId())) {
             throw new PermanentEventException(String.format(
                 "같은 orderId 에 다른 eventId 가 왔습니다. orderId=%d, existingEventId=%s, newEventId=%s",
-                orderId, eventId, event.eventId()));
+                orderId, eventId, event.eventId()), fingerprint, newFingerprint);
         }
-        String newFingerprint = event.fingerprint();
         if (!this.fingerprint.equals(newFingerprint)) {
             throw new PermanentEventException(String.format(
                 "같은 eventId 에 다른 사실이 왔습니다. eventId=%s, orderId=%d, existingFingerprint=%s, newFingerprint=%s",
-                eventId, orderId, fingerprint, newFingerprint));
+                eventId, orderId, fingerprint, newFingerprint), fingerprint, newFingerprint);
         }
     }
 }

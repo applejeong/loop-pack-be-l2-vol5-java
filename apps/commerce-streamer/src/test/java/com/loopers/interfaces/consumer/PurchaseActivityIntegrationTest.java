@@ -3,19 +3,25 @@ package com.loopers.interfaces.consumer;
 import com.loopers.domain.purchase.ProcessedOrderConfirmation;
 import com.loopers.domain.purchase.ProductPurchaseActivity;
 import com.loopers.domain.purchase.PurchaseActivityRepository;
+import com.loopers.infrastructure.purchase.KafkaDeadLetterPublisher;
 import com.loopers.testcontainers.KafkaTestContainersConfig;
 import com.loopers.utils.DatabaseCleanUp;
 import jakarta.persistence.EntityManagerFactory;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
+import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -36,9 +42,11 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.ZonedDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
@@ -77,6 +85,8 @@ class PurchaseActivityIntegrationTest {
         } catch (Exception e) {
             throw new IllegalStateException("격리 topic 생성 실패: " + TOPIC, e);
         }
+        // 충돌 record 가 가는 DLT 도 앱이 아니라 테스트가 만든다 (설계 D12)
+        KafkaTestContainersConfig.createTopic(TOPIC + KafkaDeadLetterPublisher.DLT_SUFFIX, 1);
     }
 
     @Autowired
@@ -162,7 +172,7 @@ class PurchaseActivityIntegrationTest {
     }
 
     @Order(2)
-    @DisplayName("같은 eventId 의 다른 수량, 같은 orderId 의 다른 eventId 는 충돌로 ack 만 하고 추가 저장이 없다.")
+    @DisplayName("같은 eventId 의 다른 수량, 같은 orderId 의 다른 eventId 는 충돌로 DLT 에 원본 그대로 보내고 ack 만 하며 추가 저장이 없다.")
     @Test
     void addsNothing_whenPayloadConflicts() throws Exception {
         // arrange: 주문 43 = 상품 7 × 3 정상 저장
@@ -183,6 +193,35 @@ class PurchaseActivityIntegrationTest {
         assertThat(processed.getFingerprint()).isEqualTo("43|2026-09-07T01:00:00Z|7:3");
         assertThat(purchaseActivityRepository.findProcessedByEventId("other-event:43")).isEmpty();
         assertThat(container().isRunning()).isTrue();
+
+        // 두 충돌 record 는 원본 key 그대로 DLT 에 1건씩 (설계 D12)
+        List<ConsumerRecord<String, byte[]>> deadLetters = readDeadLetters();
+        assertThat(deadLetters).hasSize(2);
+        assertThat(deadLetters).allSatisfy(deadLetter -> assertThat(deadLetter.key()).isEqualTo("43"));
+        assertThat(new String(deadLetters.get(0).value(), StandardCharsets.UTF_8)).contains("\"quantity\": 4");
+        assertThat(new String(deadLetters.get(1).value(), StandardCharsets.UTF_8)).contains("other-event:43");
+    }
+
+    /** 이 클래스 topic 의 DLT partition 0 을 처음부터 끝까지 읽는다. */
+    private static List<ConsumerRecord<String, byte[]>> readDeadLetters() {
+        Map<String, Object> props = Map.of(
+            ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, KafkaTestContainersConfig.bootstrapServers(),
+            ConsumerConfig.GROUP_ID_CONFIG, "dlt-reader-" + UUID.randomUUID(),
+            ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class,
+            ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class,
+            ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
+        List<ConsumerRecord<String, byte[]>> records = new ArrayList<>();
+        try (KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(props)) {
+            TopicPartition partition = new TopicPartition(TOPIC + KafkaDeadLetterPublisher.DLT_SUFFIX, 0);
+            consumer.assign(List.of(partition));
+            consumer.seekToBeginning(List.of(partition));
+            long end = consumer.endOffsets(List.of(partition)).get(partition);
+            long deadline = System.currentTimeMillis() + 10_000;
+            while (consumer.position(partition) < end && System.currentTimeMillis() < deadline) {
+                consumer.poll(Duration.ofMillis(500)).forEach(records::add);
+            }
+        }
+        return records;
     }
 
     @Order(3)

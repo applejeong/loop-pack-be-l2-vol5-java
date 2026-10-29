@@ -39,6 +39,8 @@ purchase-activity:
     max-retries: 3             # 일시 오류 재시도 횟수 (첫 시도 제외). 총 대기 1+2+4초는 max.poll.interval.ms(기본 5분)보다 충분히 짧다
     initial-backoff-ms: 1000
     multiplier: 2
+  dead-letter:
+    send-timeout-ms: 3000      # 영구 오류 record 를 {topic}.DLT 로 보낼 때 broker 저장 확인(acks=all) 대기 상한 (설계 D12)
 
 ---
 spring:
@@ -59,6 +61,8 @@ purchase-activity:
   retry:
     max-retries: 2
     initial-backoff-ms: 100
+  dead-letter:
+    send-timeout-ms: 1000
 
 ---
 spring:

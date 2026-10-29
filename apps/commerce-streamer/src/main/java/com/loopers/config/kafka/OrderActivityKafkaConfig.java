@@ -1,12 +1,18 @@
 package com.loopers.config.kafka;
 
 import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.common.serialization.ByteArraySerializer;
+import org.apache.kafka.common.serialization.StringSerializer;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
+import org.springframework.kafka.core.DefaultKafkaProducerFactory;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.core.ProducerFactory;
 import org.springframework.kafka.listener.CommonContainerStoppingErrorHandler;
 import org.springframework.kafka.listener.ContainerProperties;
 
@@ -23,6 +29,28 @@ import java.util.Map;
 @Configuration
 public class OrderActivityKafkaConfig {
     public static final String ORDER_ACTIVITY_LISTENER = "orderActivityKafkaListenerContainerFactory";
+    public static final String DEAD_LETTER_KAFKA_TEMPLATE = "deadLetterKafkaTemplate";
+
+    /**
+     * DLT 전용 producer (설계 D12). key String, value 는 원본 byte[] 그대로. acks=all 은 kafka.yml 의 producer 설정에서 온다.
+     * send() 가 metadata 를 못 받으면 max.block.ms(기본 60초) 동안 막히므로 발행 대기 상한과 같게 맞춘다.
+     */
+    @Bean
+    public ProducerFactory<String, byte[]> deadLetterProducerFactory(
+        KafkaProperties kafkaProperties,
+        @Value("${purchase-activity.dead-letter.send-timeout-ms}") long sendTimeoutMs
+    ) {
+        Map<String, Object> props = new HashMap<>(kafkaProperties.buildProducerProperties());
+        props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+        props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
+        props.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, sendTimeoutMs);
+        return new DefaultKafkaProducerFactory<>(props);
+    }
+
+    @Bean(name = DEAD_LETTER_KAFKA_TEMPLATE)
+    public KafkaTemplate<String, byte[]> deadLetterKafkaTemplate(ProducerFactory<String, byte[]> deadLetterProducerFactory) {
+        return new KafkaTemplate<>(deadLetterProducerFactory);
+    }
 
     @Bean(name = ORDER_ACTIVITY_LISTENER)
     public ConcurrentKafkaListenerContainerFactory<String, byte[]> orderActivityKafkaListenerContainerFactory(
