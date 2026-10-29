@@ -264,3 +264,83 @@ infrastructure        리포지터리 (JpaConfig 스캔 범위상 필수 위치)
 - Kafka fixture 구조
 - 누락 실험 hook 방법 (D5 가짜 발행기 활용)
 - 재시도 횟수·backoff 값
+
+---
+
+## 8. 실험 관찰 (4단계, 2026-10-30 실행)
+
+모든 실험은 Testcontainers 가 띄운 실제 broker(`apache/kafka:3.8.1`)·MySQL 로 돌렸다. 아래 숫자는 그 실행의 관찰값이다.
+
+**PR 요약 (📄 p.10 이 요구한 4가지)**
+
+| 항목 | 관찰값 | 근거 테스트 |
+|---|---|---|
+| 대표 주문의 활동 결과 | 주문 2 (사례 2): 장부 1행 `order-confirmed:v1:2`, 구매 활동 2행 (상품 1 × 2, 상품 2 × 1), confirmedAt `2026-09-07T01:00:00.123Z` = DB 값. 같은 record 를 다시 받아도 2행 유지 | `OrderConfirmedDeliveryGapTest`, `OrderConfirmedReplayTest`, `PurchaseActivityIntegrationTest` |
+| 배정표 (partition 2, 같은 group) | consumer 1개 `c1=[0, 1]` → 2개 `c1=[0] c2=[1]` → 3개 `c1=[0] c2=[1] c3=[]` | `PartitionAssignmentTest` |
+| 실제 offset 전후 | 재전달 실험: committed `0 → 0 → 1`, 같은 record(offset 0) 전달 2회. listener 실패 실험: 정상 record 뒤 committed `1` → 실패 record(offset 1) 중단 중 `1` 유지 → 재시작 뒤 `2` | `KafkaDeliveryTest`, `OrderConfirmedListenerFailureTest` |
+| 남은 DB→broker 누락 구간 | 주문 1 (사례 1): 주문 CONFIRMED·예약 CONSUMED·시도 SUCCESS 인데 broker record 없음·구매 활동 없음. DB commit 과 send 가 원자적이지 않다 → W7 Outbox | `OrderConfirmedDeliveryGapTest` |
+
+### 8-1. commit 뒤 send 직전 누락 구간 (📄 p.3~4, 과제 2절)
+
+두 주문을 같은 W6 직접 발행 경로(`createOrder → confirmOrder → PG SUCCESS → applyCallback → applyFinal commit → publish`)로 확정했다. 고정 clock `2026-09-07T01:00:00.123456789Z`(밀리초 절단 → `.123Z`), 품목은 상품 A × 2·상품 B × 1. 결과 적용 경로는 실제 코드이고 PG 응답만 인메모리 fixture(`FakePaymentGateway`)다.
+
+| 항목 | 사례 1 누락 | 사례 2 정상 |
+|---|---|---|
+| orderId / providerOrderId | 1 / `LP-ORD-0000000001` | 2 / `LP-ORD-0000000002` |
+| transactionKey | `FAKE-TX-000001` | `FAKE-TX-000002` |
+| eventId | `order-confirmed:v1:1` | `order-confirmed:v1:2` |
+| confirmedAt | `2026-09-07T01:00:00.123Z` | 같음 |
+| items | 상품 1 × 2, 상품 2 × 1 | 같음 |
+| 주문 / 시도 / 예약 | CONFIRMED / SUCCESS / CONSUMED ×2 | 같음 |
+| callback 응답 | settled=true (발행 실패가 주문을 되돌리지 않음) | settled=true |
+| broker record | **없음** (topic 전체를 raw consumer 로 확인) | `order-events-OrderConfirmedDeliveryGapTest` partition 0 offset 0, key `"2"` |
+| 구매 활동 | **없음** | 장부 1행 + 활동 2행 (streamer 재생) |
+
+- 사례 1 의 중단은 가짜 발행기의 send 직전 hook 이 던진 예외다. Facade 는 이를 ERROR 로그(`OrderConfirmed 발행 중 예상 못한 오류. eventId=order-confirmed:v1:1, orderId=1. 주문은 CONFIRMED 로 유지한다.`)로 남겼다. **실제 프로세스 종료였다면 이 로그도 남지 않는다. 이번 로그는 통제된 hook 으로 멈췄기 때문이다.** 실패 주입을 OS 강제 종료라고 표현하지 않는다.
+- 사례 2 의 소비는 두 앱이 별도 Spring Boot 앱이라 한 JVM 에서 이어지지 않는다. api 테스트가 broker 에서 읽은 record(key·JSON bytes·topic/partition/offset)를 녹화해 `apps/commerce-streamer/src/test/resources/experiments/delivery-gap-case2.json` 에 두었고, streamer 의 `OrderConfirmedReplayTest` 가 같은 bytes 를 자기 격리 topic 에 넣어 실제 listener·parser·DB TX·ack 까지 돌린다. W7 은 이 녹화 bytes 와 `OrderConfirmedDeliveryGapTest` 로 W6 경로를 다시 실행할 수 있다. W7 의 새 격리 실행에서는 새 orderId 가 생기며 위 숫자를 맞추지 않는다.
+- 재현: `./gradlew :apps:commerce-api:test --tests '*OrderConfirmedDeliveryGapTest'` → `apps/commerce-api/build/delivery-gap/observation.json`, `./gradlew :apps:commerce-streamer:test --tests '*OrderConfirmedReplayTest'`.
+
+### 8-2. DB commit 뒤 offset 미커밋 재전달 (📄 p.6~7, 과제 6절)
+
+격리 topic·group 에서 low-level `KafkaConsumer` 두 개가 실제 `OrderConfirmedEventParser`·`PurchaseActivityService` 를 호출했다. 두 번째 consumer 는 seek·offset reset 을 하지 않았다.
+
+| 순서 | 관찰값 |
+|---|---|
+| 준비 | 주문 46 (상품 7 × 2) 발행 → partition 0, offset n = 0 |
+| 시작 위치 | 첫 consumer 배정 콜백에서 n commit + seek → committed 0 |
+| 첫 처리 | poll → DB commit (장부 1행·활동 1행 수량 2). n+1 commit 안 함 → committed 0 |
+| 종료 | auto commit false, `close(5초)` → committed 0 (close 가 commit 하지 않음) |
+| 재시작 | 같은 group 의 새 consumer → 같은 topic·partition·offset 0 재전달, bytes 동일 |
+| 두 번째 처리 | 장부 조회로 no-op → commit 1. 활동 1행·같은 id·수량 2 불변 |
+
+관찰값: 전달 2회(`order-events-KafkaDeliveryTest-0@0` ×2), committed `0 → 0 → 1`. 일부러 `enable.auto.commit=true` 로 바꾸면 close 가 1을 commit 해 재전달이 사라지고 테스트가 실패한다.
+
+### 8-3. 실제 Spring listener 의 실패·재시작 (📄 p.7, 과제 6절 후반)
+
+격리 topic·group 의 실제 컨테이너(record factory, MANUAL_IMMEDIATE, `CommonContainerStoppingErrorHandler`). 정상 주문 46 을 먼저 처리해 committed 1 을 만든 뒤, 주문 47(상품 7 × 1, 상품 99 × 1)의 둘째 품목 저장에 오류를 주입했다.
+
+| 순서 | 관찰값 |
+|---|---|
+| 실패 | 재시도 `100ms 후 (1/2)` → `200ms 후 (2/2)` → `재시도 소진 (3회 시도). 컨테이너를 중단합니다` → `Stopped container`. 장부·활동 0행(전체 rollback), committed 1 = 실패 record 의 offset (미진행), `isRunning=false` |
+| 오류 제거·재시작 | 같은 컨테이너 `start()` → 같은 record 재전달 1회 → 장부 1행·활동 2행 → committed 2. 주문 46 은 다시 처리되지 않음 |
+
+committed offset 을 먼저 실제 값으로 만들었으므로 재전달은 `auto.offset.reset=earliest` 와 무관하게 저장된 group offset 에서 일어난다. 오류를 제거하지 않고 재시작하면 다시 중단돼 committed 가 2 가 되지 않는다(테스트로 확인).
+
+### 8-4. partition 2개·consumer group 1→2→3 (📄 p.5~6, 과제 5절)
+
+`modules/kafka` 의 순수 JUnit. 격리 topic `partition-test-{uuid}`(partition 2)·격리 group. 여러 consumer 를 한 스레드에서 번갈아 poll 해 rebalance 를 끝냈다.
+
+- 배정표: 1개 `c1=[0, 1]` → 2개 `c1=[0] c2=[1]` → 3개 `c1=[0] c2=[1] c3=[]`. 각 partition 은 한 member 에게만, 3개일 때 하나는 배정 없음.
+- partition 0·1 에 명시 전송한 record 는 각 partition 의 담당 consumer(c1, c2)가 읽었다.
+- key 매핑: key=42 10회 → 전부 partition 0, key=43 10회 → 전부 partition 0. 같은 key 는 같은 partition 으로 가지만, 다른 key 가 다른 partition 으로 간다고 단언하지 않는다(실제로 둘 다 0 이었다).
+- `acks=all` 로 보냈지만 broker 가 1개(복제 1)라 `acks=1` 과 같게 동작한다. 복제 장애 보장은 이 실험으로 확인하지 못했다.
+
+### 8-5. 공통 사항과 한계
+
+- Testcontainers 가 실행 뒤 컨테이너(Kafka·MySQL·Redis)를 자동 정리한다. 임시 DB·topic 을 일주일 유지하지 않으며, 넘기는 것은 재현 코드와 위 관찰값이다.
+- 실험 record 는 모두 격리 topic(`order-events-…Test`, `partition-test-…`)에 보냈다. 업무 topic 과 분리돼 가짜 구매 활동을 만들지 않았다.
+- 결과 적용 경로(`PaymentFacade → PaymentResultService → OrderConfirmedPublisher`)는 실제 코드이고, PG 응답만 인메모리 fixture 다.
+- 통제된 종료의 한계: hook 예외, `close()`, 컨테이너 `start()` 는 OS 강제 종료·프로세스 재기동과 다르다. 특히 `close()` 는 LeaveGroup 을 보내 즉시 rebalance 되지만, 강제 종료면 session timeout 뒤에야 재배정된다.
+- 발행 결과 "미확인(UNKNOWN)"은 실제 broker 로 재현하지 않고 mock future 로만 검증했다 (D7).
+- 가짜 발행기를 쓰지 않는 기존 api 테스트는 실제 Kafka publisher 로 test broker 의 `order-events` 에 발행한다. 이 topic 은 fixture 가 미리 만든다(앱은 topic 을 만들지 않음).
+- 단일 broker 라 복제·ISR 관련 보장은 설명만 가능하고 관찰하지 못했다 (5절 한계 참고).
