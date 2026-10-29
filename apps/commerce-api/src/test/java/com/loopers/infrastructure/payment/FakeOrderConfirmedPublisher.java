@@ -18,10 +18,16 @@ public class FakeOrderConfirmedPublisher implements OrderConfirmedPublisher {
     private final List<OrderConfirmedEvent> published = new CopyOnWriteArrayList<>();
     private final List<Boolean> transactionActiveAtPublish = new CopyOnWriteArrayList<>();
     private volatile Consumer<OrderConfirmedEvent> beforeSend = event -> { };
+    private volatile OrderConfirmedPublisher delegate;
 
-    /** send 직전에 실행할 hook. 예외를 던지면 그 이벤트는 발행 목록에 남지 않는다. */
+    /** send 직전에 실행할 hook. 예외를 던지면 그 이벤트는 발행 목록에 남지 않는다 (위임 발행기도 호출되지 않는다). */
     public void beforeSend(Consumer<OrderConfirmedEvent> hook) {
         this.beforeSend = hook;
+    }
+
+    /** hook 을 통과한 이벤트를 실제 발행기(예: KafkaOrderConfirmedPublisher)로 보낸다. 누락 실험의 "정상 발행" 사례용. */
+    public void delegateTo(OrderConfirmedPublisher delegate) {
+        this.delegate = delegate;
     }
 
     /** 이후 발행이 지정한 outcome 의 OrderConfirmedPublishException 으로 끝난다. */
@@ -48,12 +54,16 @@ public class FakeOrderConfirmedPublisher implements OrderConfirmedPublisher {
         published.clear();
         transactionActiveAtPublish.clear();
         beforeSend = event -> { };
+        delegate = null;
     }
 
     @Override
     public void publish(OrderConfirmedEvent event) {
         transactionActiveAtPublish.add(TransactionSynchronizationManager.isActualTransactionActive());
         beforeSend.accept(event);
+        if (delegate != null) {
+            delegate.publish(event);
+        }
         published.add(event);
     }
 }
