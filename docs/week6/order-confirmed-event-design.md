@@ -149,6 +149,8 @@ product_purchase_activity         (품목당 1행)
 - fingerprint = `orderId|confirmedAt|productId:quantity,...`(productId 오름차순). items 순서가 바뀌어도 같은 값이 나온다 (📄 p.2 정규화 규칙).
 - 사람이 읽을 수 있는 문자열이라 충돌 시 무엇이 달랐는지 장부에서 바로 보인다.
 - productId는 사실의 식별자로 보존하고, 현재 상품 행·가격을 조회하지 않는다 (📄 p.4).
+- `processed_at`은 엔티티가 `now()`를 부르지 않고 호출자가 streamer의 `Clock` 빈으로 찍어 넘긴다. 테스트에서 고정하기 위해서다.
+- 두 테이블은 리포지터리 하나(`PurchaseActivityRepository`)로 다룬다. 한 TX에서 함께 쓰고 중복 판단 때 함께 읽는 한 묶음이라 나누면 협력 대상만 늘어난다.
 
 | 받은 이벤트 | 처리 |
 |---|---|
@@ -171,6 +173,7 @@ product_purchase_activity         (품목당 1행)
 |---|---|---|
 | 영구 오류 | 충돌, 깨진 JSON, key ≠ orderId, 수량 ≤ 0 | 재시도 없음. ERROR 로그(eventId·orderId·기존/새 fingerprint) 후 ack. 구매 활동 생성 없음 |
 | 일시 오류 | DB 장애, UNIQUE 경쟁 위반 | backoff 재시도 → 상한 초과 시 consumer 중단 → 원인 제거 후 재시작 |
+| 예상 못한 오류(버그) | 엔티티 생성자 검증 실패(`IllegalArgumentException`) 등 영구 오류로 분류하지 않은 모든 예외 | 일시 오류와 같이 재시도 후 중단. 영구 오류로 ack 해 버리면 버그가 조용히 묻히므로 멈춰서 드러낸다 |
 
 - 영구 오류는 다시 해도 결과가 같으므로 멈추면 뒤 메시지까지 막히는 독약 메시지가 된다.
   > 📄 p.4 "충돌로 드러내고 추가 구매를 만들지 않습니다."
