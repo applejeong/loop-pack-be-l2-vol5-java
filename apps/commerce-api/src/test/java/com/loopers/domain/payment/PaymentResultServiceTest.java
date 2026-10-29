@@ -12,8 +12,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
+import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.List;
 import java.util.Optional;
 
@@ -35,6 +40,13 @@ class PaymentResultServiceTest {
     private static final Long ATTEMPT_ID = 7L;
     private static final Long ORDER_ID = 100L;
     private static final String TRANSACTION_KEY = "FAKE-TX-000001";
+    private static final ZoneId ZONE = ZoneId.of("Asia/Seoul");
+    /** 고정 Clock 은 나노초까지 있고, 주문 종결 UPDATE 에는 밀리초로 잘린 같은 시각이 넘어가야 한다 (6주차 설계 D2). */
+    private static final Instant NOW = Instant.parse("2026-09-07T01:00:00.123456789Z");
+    private static final ZonedDateTime AT = ZonedDateTime.ofInstant(Instant.parse("2026-09-07T01:00:00.123Z"), ZONE);
+
+    @Spy
+    private Clock clock = Clock.fixed(NOW, ZONE);
 
     @Mock
     private PaymentAttemptRepository paymentAttemptRepository;
@@ -73,12 +85,12 @@ class PaymentResultServiceTest {
 
             // assert
             assertThat(applied).isFalse();
-            verify(orderRepository, never()).finishIfPaymentPending(anyLong(), any(), anyLong());
+            verify(orderRepository, never()).finishIfPaymentPending(anyLong(), any(), anyLong(), any());
             verify(stockReservationRepository, never()).findAllByOrderId(anyLong());
             verify(productRepository, never()).restoreStock(anyLong(), anyInt());
         }
 
-        @DisplayName("SUCCESS 면, 주문을 CONFIRMED + 결제액으로 바꾸고 예약을 소비하며 재고는 추가로 건드리지 않는다.")
+        @DisplayName("SUCCESS 면, 주문을 CONFIRMED + 결제액 + 밀리초로 자른 확정 시각으로 바꾸고 예약을 소비하며 재고는 추가로 건드리지 않는다.")
         @Test
         void confirmsOrderAndConsumesReservations_whenSuccess() {
             // arrange
@@ -90,7 +102,7 @@ class PaymentResultServiceTest {
 
             // assert
             assertThat(applied).isTrue();
-            verify(orderRepository).finishIfPaymentPending(ORDER_ID, Order.OrderStatus.CONFIRMED, 2000L);
+            verify(orderRepository).finishIfPaymentPending(ORDER_ID, Order.OrderStatus.CONFIRMED, 2000L, AT);
             verify(stockReservationRepository).consumeIfReserved(reservation.getId());
             verify(stockReservationRepository, never()).releaseIfReserved(anyLong());
             verify(productRepository, never()).restoreStock(anyLong(), anyInt());
@@ -111,7 +123,7 @@ class PaymentResultServiceTest {
 
             // assert
             assertThat(applied).isTrue();
-            verify(orderRepository).finishIfPaymentPending(ORDER_ID, Order.OrderStatus.PAYMENT_FAILED, 0L);
+            verify(orderRepository).finishIfPaymentPending(ORDER_ID, Order.OrderStatus.PAYMENT_FAILED, 0L, AT);
             verify(productRepository).restoreStock(10L, 2);
             verify(stockReservationRepository, never()).consumeIfReserved(anyLong());
         }

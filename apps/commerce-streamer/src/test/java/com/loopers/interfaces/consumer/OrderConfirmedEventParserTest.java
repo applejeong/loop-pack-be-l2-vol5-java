@@ -67,6 +67,15 @@ class OrderConfirmedEventParserTest {
 
             assertThat(event.fingerprint()).isEqualTo("42|2026-09-07T01:00:00Z|7:2,8:1");
         }
+
+        @DisplayName("밀리초가 있는 confirmedAt (commerce-api 가 Clock 을 밀리초로 잘라 발행) 도 그대로 읽혀 fingerprint 에 찍힌다.")
+        @Test
+        void keepsMillis_whenConfirmedAtHasFraction() {
+            OrderConfirmedEvent event = parser.parse("42", bytes(ORDER_42_JSON.replace("2026-09-07T01:00:00Z", "2026-09-07T01:00:00.123Z")));
+
+            assertThat(event.confirmedAt().toInstant()).isEqualTo(ZonedDateTime.parse("2026-09-07T01:00:00.123Z").toInstant());
+            assertThat(event.fingerprint()).isEqualTo("42|2026-09-07T01:00:00.123Z|7:2,8:1");
+        }
     }
 
     @DisplayName("계약을 어기면 영구 오류다: ")

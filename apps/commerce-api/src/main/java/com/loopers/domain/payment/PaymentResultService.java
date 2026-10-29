@@ -13,6 +13,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
 import java.time.ZonedDateTime;
+import java.time.temporal.ChronoUnit;
 
 /**
  * 로컬 TX B. create 응답·callback·reconcile 세 입구가 공유하며, 검증된 PG 결과를 시도·주문·예약에 한 번만 반영한다.
@@ -45,10 +46,14 @@ public class PaymentResultService {
             return false;
         }
 
+        // 확정 시각은 밀리초로 잘라 한 번만 만든다. 저장(confirmedAt·updatedAt)과 발행 payload 가 같은 값을 쓴다 (6주차 설계 D2).
+        ZonedDateTime at = ZonedDateTime.now(clock).truncatedTo(ChronoUnit.MILLIS);
         if (result.isSuccess()) {
-            orderRepository.finishIfPaymentPending(attempt.getOrderId(), Order.OrderStatus.CONFIRMED, attempt.getAmount());
+            // 1 이면 이 호출이 주문을 처음 CONFIRMED 로 만든 것이다 (D3). 3-2 에서 발행 조건으로 쓴다.
+            int confirmedRows = orderRepository.finishIfPaymentPending(
+                attempt.getOrderId(), Order.OrderStatus.CONFIRMED, attempt.getAmount(), at);
         } else {
-            orderRepository.finishIfPaymentPending(attempt.getOrderId(), Order.OrderStatus.PAYMENT_FAILED, 0L);
+            orderRepository.finishIfPaymentPending(attempt.getOrderId(), Order.OrderStatus.PAYMENT_FAILED, 0L, at);
         }
 
         for (StockReservation reservation : stockReservationRepository.findAllByOrderId(attempt.getOrderId())) {

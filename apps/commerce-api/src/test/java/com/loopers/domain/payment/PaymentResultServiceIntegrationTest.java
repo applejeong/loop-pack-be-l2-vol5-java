@@ -17,20 +17,26 @@ import com.loopers.infrastructure.user.UserJpaRepository;
 import com.loopers.utils.ConcurrentRunner;
 import com.loopers.utils.DatabaseCleanUp;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.BDDMockito.given;
 
 /**
  * TX B(PaymentResultService)가 같은 결과를 한 번만 반영하는지 실제 MySQL 로 검증한다.
@@ -43,6 +49,12 @@ class PaymentResultServiceIntegrationTest {
 
     private static final Duration TIMEOUT = Duration.ofSeconds(30);
     private static final String TRANSACTION_KEY = "FAKE-TX-000001";
+    /** 고정 Clock 의 시각은 나노초까지 있고, 저장되는 확정 시각은 밀리초로 잘린 값이어야 한다 (6주차 설계 D2). */
+    private static final Instant NOW = Instant.parse("2026-09-07T01:00:00.123456789Z");
+    private static final Instant CONFIRMED_AT = Instant.parse("2026-09-07T01:00:00.123Z");
+
+    @MockitoBean
+    private Clock clock;
 
     private final PaymentResultService paymentResultService;
     private final OrderFacade orderFacade;
@@ -80,6 +92,12 @@ class PaymentResultServiceIntegrationTest {
         this.databaseCleanUp = databaseCleanUp;
     }
 
+    @BeforeEach
+    void setUp() {
+        given(clock.instant()).willReturn(NOW);
+        given(clock.getZone()).willReturn(ZoneId.of("Asia/Seoul"));
+    }
+
     @AfterEach
     void tearDown() {
         databaseCleanUp.truncateAllTables();
@@ -115,6 +133,8 @@ class PaymentResultServiceIntegrationTest {
             Order order = orderOf(seed);
             assertThat(order.getStatus()).isEqualTo(Order.OrderStatus.PAYMENT_FAILED);
             assertThat(order.getPaidAmount()).isZero();
+            assertThat(order.getConfirmedAt()).isNull();
+            assertThat(order.getUpdatedAt().toInstant()).isEqualTo(CONFIRMED_AT);
         }
 
         @DisplayName("같은 FAILED 결과를 8개 스레드가 동시에 적용하면, 정확히 하나만 반영되고 재고는 5 다.")
@@ -145,12 +165,14 @@ class PaymentResultServiceIntegrationTest {
     @DisplayName("이미 종결된 시도에 다른 결과가 오면, ")
     @Nested
     class AfterSettlement {
-        @DisplayName("SUCCESS 로 종결된 시도에 FAILED 를 적용해도, 아무것도 바뀌지 않는다 (덮어쓰지 않음).")
+        @DisplayName("SUCCESS 로 종결된 시도에 FAILED 를 적용해도, 아무것도 바뀌지 않는다 (덮어쓰지 않음). confirmedAt 은 고정 Clock 의 밀리초 절단값으로 한 번만 기록된다.")
         @Test
         void doesNotOverwrite_whenFailedArrivesAfterSuccess() {
             // arrange
             Seed seed = seedReservedOrder();
             assertThat(paymentResultService.applyFinal(seed.attemptId(), PaymentFinalResult.success(TRANSACTION_KEY))).isTrue();
+            assertThat(orderOf(seed).getConfirmedAt().toInstant()).isEqualTo(CONFIRMED_AT);
+            given(clock.instant()).willReturn(NOW.plusSeconds(60));
 
             // act
             boolean applied = paymentResultService.applyFinal(
@@ -164,6 +186,8 @@ class PaymentResultServiceIntegrationTest {
             Order order = orderOf(seed);
             assertThat(order.getStatus()).isEqualTo(Order.OrderStatus.CONFIRMED);
             assertThat(order.getPaidAmount()).isEqualTo(2000L);
+            assertThat(order.getConfirmedAt().toInstant()).isEqualTo(CONFIRMED_AT);
+            assertThat(order.getUpdatedAt().toInstant()).isEqualTo(CONFIRMED_AT);
             assertThat(reservationOf(seed).getStatus()).isEqualTo(StockReservation.Status.CONSUMED);
             assertThat(stockOf(seed.productId())).isEqualTo(3);
         }
