@@ -27,7 +27,7 @@
              ▼
 [commerce-streamer]
  OrderConfirmedListener (interfaces/consumer, record listener)
-   → 파싱·검증 (영구 오류면 ERROR 로그 + ack)
+   → 파싱·검증 (영구 오류면 원본 record 를 {topic}.DLT 로 발행 + ack)
    → 일시 오류 backoff 재시도 → 상한 초과 시 예외 → 컨테이너 중단
    → PurchaseActivityService (application/domain, 별도 빈의 DB TX)
         · processed_order_confirmation 1행
@@ -168,16 +168,19 @@ product_purchase_activity         (품목당 1행)
 - 경쟁으로 UNIQUE 위반이 나면 일시 오류로 분류해 재시도(D12)하고, 재시도 시 조회 단계에서 no-op으로 정리된다. 잘못 저장되는 일은 없다.
 - 중간 품목 저장 실패 시 장부·앞선 품목까지 함께 rollback한다 (📄 p.4).
 
-### D12. 오류 처리 → 영구 오류는 로그 + ack, 일시 오류는 재시도 후 중단
+### D12. 오류 처리 → 영구 오류는 DLT 발행 + ack, 일시 오류는 재시도 후 중단 (DLT 는 2026-10-30 적용 완료)
 
 | 구분 | 예 | 처리 |
 |---|---|---|
-| 영구 오류 | 충돌, 깨진 JSON, key ≠ orderId, 수량 ≤ 0 | 재시도 없음. ERROR 로그(eventId·orderId·기존/새 fingerprint) 후 ack. 구매 활동 생성 없음 |
+| 영구 오류 | 충돌, 깨진 JSON, key ≠ orderId, 수량 ≤ 0 | 재시도 없음. 원본 key·value bytes 를 그대로 `{원본 topic}.DLT`(운영 `order-events.DLT`)로 발행하고 ack. 헤더: 원인 예외 클래스·메시지, 원본 topic·partition·offset, 충돌이면 기존/새 fingerprint. 구매 활동 생성 없음 |
+| DLT 발행 실패 | broker 불가, DLT topic 없음, 대기 상한 초과 | 일시 오류와 같이 backoff 재시도 → 소진 시 consumer 중단, ack 하지 않음. 원본 record 는 재시작 뒤 다시 온다 |
 | 일시 오류 | DB 장애, UNIQUE 경쟁 위반 | backoff 재시도 → 상한 초과 시 consumer 중단 → 원인 제거 후 재시작 |
 | 예상 못한 오류(버그) | 엔티티 생성자 검증 실패(`IllegalArgumentException`) 등 영구 오류로 분류하지 않은 모든 예외 | 일시 오류와 같이 재시도 후 중단. 영구 오류로 ack 해 버리면 버그가 조용히 묻히므로 멈춰서 드러낸다 |
 
-- 영구 오류는 다시 해도 결과가 같으므로 멈추면 뒤 메시지까지 막히는 독약 메시지가 된다.
+- 영구 오류는 다시 해도 결과가 같으므로 멈추면 뒤 메시지까지 막히는 독약 메시지가 된다. 대신 DLT 로 보내 사실을 보존하고 뒤 메시지는 계속 흐르게 한다.
   > 📄 p.4 "충돌로 드러내고 추가 구매를 만들지 않습니다."
+- DLT 발행 성공 로그는 WARN 이 아니라 **ERROR** 다. 이번 주에는 DLT 를 읽는 쪽(재처리)이 없어 이 로그가 유일한 알림이기 때문이다.
+- DLT topic 은 앱이 만들지 않는다 (운영자 생성, 테스트는 격리 topic 의 `.DLT` 를 직접 생성). DLT 전용 `KafkaTemplate<String, byte[]>` 를 streamer 에 두고 acks=all 로 보낸다.
 - 일시 오류의 중단·재시작 흐름은 과제의 listener 실패 실험과 일치한다.
   > 📄 p.9 "오류 제거 후 같은 group으로 컨테이너를 재시작해 재전달·정상 저장·ack까지 확인합니다."
 - 재시도 총 대기 시간은 `max.poll.interval.ms`(기본 5분)보다 충분히 짧게 잡는다.
@@ -250,7 +253,7 @@ infrastructure        리포지터리 (JpaConfig 스캔 범위상 필수 위치)
 |---|---|---|
 | D7 send 방식 | 동기 대기 | W7 Outbox relay 설계 시 비동기 재검토 |
 | D11 UNIQUE 경쟁 | 재시도 후 조회로 no-op | 위반 시 rollback → 별도 TX 재확인 (제약 이름으로 구분, `saveAndFlush`, 동시성 테스트) |
-| D12 영구 오류 | ERROR 로그 + ack | DLT(`order-events.DLT`) 발행 |
+| D12 영구 오류 | ~~ERROR 로그 + ack~~ → **적용 완료 (2026-10-30)**: `{topic}.DLT` 발행 + ack | DLT 를 읽는 쪽(재처리 consumer·재투입 도구)은 이번에 없다. W7 이후 |
 | D13 재시도·중단 | 리스너 직접 재시도 + 중단 handler | `DefaultErrorHandler` + backoff + DLT recoverer |
 
 나중에 바꾸기 쉽게 지금 해 둘 것: UNIQUE 제약 이름 지정, 저장 로직을 리스너와 다른 빈으로 분리, fingerprint 비교를 메서드 하나로 분리.
@@ -270,6 +273,8 @@ infrastructure        리포지터리 (JpaConfig 스캔 범위상 필수 위치)
 ## 8. 실험 관찰 (4단계, 2026-10-30 실행)
 
 모든 실험은 Testcontainers 가 띄운 실제 broker(`apache/kafka:3.8.1`)·MySQL 로 돌렸다. 아래 숫자는 그 실행의 관찰값이다.
+
+최종 검증 (DLT 적용 뒤, 2026-10-30): `./gradlew :modules:kafka:check :apps:commerce-api:check :apps:commerce-streamer:check` → modules:kafka 3건, commerce-api 453건, commerce-streamer 43건 통과. 실패 0, skip 0. Checkstyle·ArchUnit 포함.
 
 **PR 요약 (📄 p.10 이 요구한 4가지)**
 
@@ -321,7 +326,7 @@ infrastructure        리포지터리 (JpaConfig 스캔 범위상 필수 위치)
 
 | 순서 | 관찰값 |
 |---|---|
-| 실패 | 재시도 `100ms 후 (1/2)` → `200ms 후 (2/2)` → `재시도 소진 (3회 시도). 컨테이너를 중단합니다` → `Stopped container`. 장부·활동 0행(전체 rollback), committed 1 = 실패 record 의 offset (미진행), `isRunning=false` |
+| 실패 | `구매 활동 반영 일시 오류, 100ms 후 재시도 (1/2)` → `200ms 후 재시도 (2/2)` → `구매 활동 반영 일시 오류 재시도 소진 (3회 시도). 컨테이너를 중단합니다` → `Stopped container`. 장부·활동 0행(전체 rollback), committed 1 = 실패 record 의 offset (미진행), `isRunning=false` |
 | 오류 제거·재시작 | 같은 컨테이너 `start()` → 같은 record 재전달 1회 → 장부 1행·활동 2행 → committed 2. 주문 46 은 다시 처리되지 않음 |
 
 committed offset 을 먼저 실제 값으로 만들었으므로 재전달은 `auto.offset.reset=earliest` 와 무관하게 저장된 group offset 에서 일어난다. 오류를 제거하지 않고 재시작하면 다시 중단돼 committed 가 2 가 되지 않는다(테스트로 확인).
@@ -335,7 +340,20 @@ committed offset 을 먼저 실제 값으로 만들었으므로 재전달은 `au
 - key 매핑: key=42 10회 → 전부 partition 0, key=43 10회 → 전부 partition 0. 같은 key 는 같은 partition 으로 가지만, 다른 key 가 다른 partition 으로 간다고 단언하지 않는다(실제로 둘 다 0 이었다).
 - `acks=all` 로 보냈지만 broker 가 1개(복제 1)라 `acks=1` 과 같게 동작한다. 복제 장애 보장은 이 실험으로 확인하지 못했다.
 
-### 8-5. 공통 사항과 한계
+### 8-5. 영구 오류의 DLT 전환 (D12 적용, 6절 예약분)
+
+격리 topic `order-events-OrderConfirmedDeadLetterTest` 와 그 `.DLT` 를 테스트가 만들고, 실제 리스너·실제 DLT producer 로 돌렸다.
+
+| 장면 | 관찰값 |
+|---|---|
+| 충돌 (주문 48: 7 × 3 저장 뒤 같은 eventId 로 7 × 4) | DLT `…DLT-0@0`, key `48`, value = 원본 bytes. 헤더 `dlt.exception.class=PermanentEventException`, `dlt.exception.message=같은 eventId 에 다른 사실…`, `dlt.original.topic/partition/offset=…Test/0/1`, `dlt.existing.fingerprint=48\|2026-09-07T01:00:00Z\|7:3`, `dlt.new.fingerprint=48\|…\|7:4`. 활동 1행(수량 3) 유지, committed 전진, 컨테이너 실행 중 |
+| 깨진 JSON (주문 49) | DLT `…DLT-0@1`, key `49`, value = 원본 bytes, 예외 헤더만 있고 fingerprint 헤더 없음. 장부 없음 |
+| DLT 발행 실패 주입 (주문 50 충돌) | `DLT 발행 일시 오류, 100ms 후 재시도 (1/2)` → `200ms 후 재시도 (2/2)` → `DLT 발행 일시 오류 재시도 소진 (3회 시도). 컨테이너를 중단합니다`. committed = 그 record 의 offset(4) 그대로, DLT 추가 없음, 활동 1행(수량 1) 유지 |
+| 기존 통합 테스트의 충돌 2건 (주문 43) | `order-events-PurchaseActivityIntegrationTest.DLT` 에 key `43` 2건(수량 4, 다른 eventId), 활동 1행(수량 3) 유지, ack |
+
+로그 예: `영구 오류 record 를 DLT 로 보냈습니다 (구매 활동 없음). dlt=order-events-OrderConfirmedDeadLetterTest.DLT-0@0, original=order-events-OrderConfirmedDeadLetterTest-0@1, key=48, cause=PermanentEventException: 같은 eventId 에 다른 사실이 왔습니다. …` (ERROR). 일부러 DLT 실패를 삼키고 ack 하도록 바꾸면 "중단·offset 미진행" 테스트가 실패한다.
+
+### 8-6. 공통 사항과 한계
 
 - Testcontainers 가 실행 뒤 컨테이너(Kafka·MySQL·Redis)를 자동 정리한다. 임시 DB·topic 을 일주일 유지하지 않으며, 넘기는 것은 재현 코드와 위 관찰값이다.
 - 실험 record 는 모두 격리 topic(`order-events-…Test`, `partition-test-…`)에 보냈다. 업무 topic 과 분리돼 가짜 구매 활동을 만들지 않았다.
@@ -344,3 +362,6 @@ committed offset 을 먼저 실제 값으로 만들었으므로 재전달은 `au
 - 발행 결과 "미확인(UNKNOWN)"은 실제 broker 로 재현하지 않고 mock future 로만 검증했다 (D7).
 - 가짜 발행기를 쓰지 않는 기존 api 테스트는 실제 Kafka publisher 로 test broker 의 `order-events` 에 발행한다. 이 topic 은 fixture 가 미리 만든다(앱은 topic 을 만들지 않음).
 - 단일 broker 라 복제·ISR 관련 보장은 설명만 가능하고 관찰하지 못했다 (5절 한계 참고).
+- DLT 를 읽는 쪽(재처리 consumer, 재투입 도구)은 이번에 없다. DLT 발행 성공의 ERROR 로그가 유일한 알림이다.
+- DLT 발행 후 ack 전에 종료되면 같은 record 가 다시 와서 DLT 에 중복으로 들어갈 수 있다. 원본 topic·partition·offset 헤더로 중복을 구분할 수 있다.
+- 운영 배포 전 `order-events`·`order-events.DLT` 토픽을 미리 생성해야 한다. 없으면 첫 영구 오류에서 DLT 발행이 실패해 consumer 가 멈춘다 (메시지 손실은 없음).
