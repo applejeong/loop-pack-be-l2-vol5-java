@@ -27,6 +27,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class PurchaseActivityRepositoryTest {
 
     private static final ZonedDateTime CONFIRMED_AT = ZonedDateTime.parse("2026-09-07T01:00:00Z");
+    private static final ZonedDateTime PROCESSED_AT = ZonedDateTime.parse("2026-09-07T01:00:05Z");
 
     private final PurchaseActivityRepository purchaseActivityRepository;
     private final EntityManager entityManager;
@@ -57,7 +58,7 @@ class PurchaseActivityRepositoryTest {
         void persistsBothRows_whenReloadedAfterFlushAndClear() {
             // arrange
             purchaseActivityRepository.saveProcessed(
-                new ProcessedOrderConfirmation("order-confirmed:v1:42", 42L, CONFIRMED_AT, "42|2026-09-07T01:00:00Z|7:2,8:1"));
+                new ProcessedOrderConfirmation("order-confirmed:v1:42", 42L, CONFIRMED_AT, "42|2026-09-07T01:00:00Z|7:2,8:1", PROCESSED_AT));
             purchaseActivityRepository.saveActivity(new ProductPurchaseActivity(42L, 8L, 1, CONFIRMED_AT));
             purchaseActivityRepository.saveActivity(new ProductPurchaseActivity(42L, 7L, 2, CONFIRMED_AT));
 
@@ -71,7 +72,7 @@ class PurchaseActivityRepositoryTest {
             assertThat(processed.getOrderId()).isEqualTo(42L);
             assertThat(processed.getConfirmedAt().toInstant()).isEqualTo(CONFIRMED_AT.toInstant());
             assertThat(processed.getFingerprint()).isEqualTo("42|2026-09-07T01:00:00Z|7:2,8:1");
-            assertThat(processed.getProcessedAt()).isNotNull();
+            assertThat(processed.getProcessedAt().toInstant()).isEqualTo(PROCESSED_AT.toInstant());
             assertThat(purchaseActivityRepository.findProcessedByOrderId(42L)).isPresent();
             assertThat(activities).hasSize(2);
             assertThat(activities.get(0).getProductId()).isEqualTo(7L);
@@ -88,10 +89,10 @@ class PurchaseActivityRepositoryTest {
         @DisplayName("같은 eventId 의 장부를 두 번 저장하면 uk_poc_event_id 위반으로 거절한다.")
         @Test
         void rejectsDuplicateEventId() {
-            purchaseActivityRepository.saveProcessed(new ProcessedOrderConfirmation("order-confirmed:v1:42", 42L, CONFIRMED_AT, "fp"));
+            purchaseActivityRepository.saveProcessed(new ProcessedOrderConfirmation("order-confirmed:v1:42", 42L, CONFIRMED_AT, "fp", PROCESSED_AT));
 
             assertThatThrownBy(() -> purchaseActivityRepository.saveProcessed(
-                new ProcessedOrderConfirmation("order-confirmed:v1:42", 43L, CONFIRMED_AT, "fp")))
+                new ProcessedOrderConfirmation("order-confirmed:v1:42", 43L, CONFIRMED_AT, "fp", PROCESSED_AT)))
                 .isInstanceOf(DataIntegrityViolationException.class)
                 .rootCause().hasMessageContaining("uk_poc_event_id");
         }
@@ -99,10 +100,10 @@ class PurchaseActivityRepositoryTest {
         @DisplayName("같은 orderId 의 장부를 두 번 저장하면 uk_poc_order_id 위반으로 거절한다.")
         @Test
         void rejectsDuplicateOrderId() {
-            purchaseActivityRepository.saveProcessed(new ProcessedOrderConfirmation("order-confirmed:v1:42", 42L, CONFIRMED_AT, "fp"));
+            purchaseActivityRepository.saveProcessed(new ProcessedOrderConfirmation("order-confirmed:v1:42", 42L, CONFIRMED_AT, "fp", PROCESSED_AT));
 
             assertThatThrownBy(() -> purchaseActivityRepository.saveProcessed(
-                new ProcessedOrderConfirmation("other-event", 42L, CONFIRMED_AT, "fp")))
+                new ProcessedOrderConfirmation("other-event", 42L, CONFIRMED_AT, "fp", PROCESSED_AT)))
                 .isInstanceOf(DataIntegrityViolationException.class)
                 .rootCause().hasMessageContaining("uk_poc_order_id");
         }

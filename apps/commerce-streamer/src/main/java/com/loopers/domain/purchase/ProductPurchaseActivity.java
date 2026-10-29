@@ -31,6 +31,18 @@ public class ProductPurchaseActivity extends BaseEntity {
     protected ProductPurchaseActivity() {}
 
     public ProductPurchaseActivity(Long orderId, Long productId, int quantity, ZonedDateTime confirmedAt) {
+        if (orderId == null) {
+            throw new IllegalArgumentException("구매 활동의 orderId 는 필수입니다.");
+        }
+        if (productId == null) {
+            throw new IllegalArgumentException("구매 활동의 productId 는 필수입니다.");
+        }
+        if (quantity <= 0) {
+            throw new IllegalArgumentException("구매 수량은 1개 이상이어야 합니다.");
+        }
+        if (confirmedAt == null) {
+            throw new IllegalArgumentException("구매 활동의 confirmedAt 은 필수입니다.");
+        }
         this.orderId = orderId;
         this.productId = productId;
         this.quantity = quantity;
