@@ -2,6 +2,7 @@ package com.loopers.infrastructure.payment;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.loopers.application.payment.OrderConfirmedPublishException;
 import com.loopers.application.payment.OrderConfirmedPublisher;
 import com.loopers.domain.order.OrderConfirmedEvent;
 import com.loopers.domain.order.OrderItem;
@@ -14,17 +15,21 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.kafka.core.DefaultKafkaProducerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.support.SendResult;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -33,10 +38,16 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.BDDMockito.given;
+import static org.mockito.Mockito.mock;
 
 /**
  * 실제 test broker 로 보낸 record 를 다시 읽어 이벤트 계약(6주차 설계 1절·D6·D9)을 확인한다.
@@ -141,7 +152,7 @@ class KafkaOrderConfirmedPublisherTest {
         assertThat(new String(record.value(), StandardCharsets.UTF_8)).contains("\"confirmedAt\":\"2026-09-07T01:00:00.123Z\"");
     }
 
-    @DisplayName("닿지 않는 broker 면 대기 상한 안에 eventId·orderId 를 담은 발행 실패 예외가 난다 (주문 상태는 호출자가 그대로 둔다).")
+    @DisplayName("닿지 않는 broker 면 대기 상한 안에 producer 가 포기하므로 outcome=FAILED(실패 확정) 예외가 난다 (주문 상태는 호출자가 그대로 둔다).")
     @Test
     void failsWithinTimeout_whenBrokerUnreachable() {
         Map<String, Object> props = Map.of(
@@ -155,10 +166,65 @@ class KafkaOrderConfirmedPublisherTest {
 
         long started = System.currentTimeMillis();
         assertThatThrownBy(() -> deadPublisher.publish(event))
-            .isInstanceOf(IllegalStateException.class)
+            .isInstanceOf(OrderConfirmedPublishException.class)
+            .hasMessageContaining("outcome=FAILED")
             .hasMessageContaining("order-confirmed:v1:44")
-            .hasMessageContaining("orderId=44");
+            .hasMessageContaining("orderId=44")
+            .extracting(e -> ((OrderConfirmedPublishException) e).getOutcome())
+            .isEqualTo(OrderConfirmedPublishException.Outcome.FAILED);
         assertThat(System.currentTimeMillis() - started).isLessThan(5_000);
         assertThat(readAll()).noneMatch(r -> "44".equals(r.key()));
+    }
+
+    /**
+     * 실제 broker 로는 "버퍼에 남아 재시도 중" 상태를 재현하기 어려워 KafkaTemplate 을 mock 으로 바꿔 future 의 세 가지 끝을 흉내 낸다.
+     */
+    @DisplayName("send 결과 분류: ")
+    @Nested
+    class OutcomeClassification {
+
+        private final KafkaTemplate<String, byte[]> template = mock(KafkaTemplate.class);
+        private final OrderConfirmedPublisher mockedPublisher = new KafkaOrderConfirmedPublisher(objectMapper, template, TOPIC, 200L);
+        private final OrderConfirmedEvent event = OrderConfirmedEvent.of(45L, ZonedDateTime.parse("2026-09-07T01:00:00Z"), ORDER_42_ITEMS);
+
+        @DisplayName("future 가 metadata 로 완료되면 성공이고 예외가 없다.")
+        @Test
+        void success_whenFutureCompletes() {
+            ProducerRecord<String, byte[]> record = new ProducerRecord<>(TOPIC, "45", new byte[0]);
+            RecordMetadata metadata = new RecordMetadata(new TopicPartition(TOPIC, 0), 7L, 0, 0L, 0, 0);
+            given(template.send(eq(TOPIC), eq("45"), any(byte[].class)))
+                .willReturn(CompletableFuture.completedFuture(new SendResult<>(record, metadata)));
+
+            assertThatCode(() -> mockedPublisher.publish(event)).doesNotThrowAnyException();
+        }
+
+        @DisplayName("future 가 예외로 끝나면(producer 포기) outcome=FAILED 이고 원인이 보존된다.")
+        @Test
+        void failed_whenFutureCompletesExceptionally() {
+            given(template.send(eq(TOPIC), eq("45"), any(byte[].class)))
+                .willReturn(CompletableFuture.failedFuture(
+                    new org.apache.kafka.common.errors.TimeoutException("Expiring 1 record(s): delivery.timeout.ms 소진")));
+
+            assertThatThrownBy(() -> mockedPublisher.publish(event))
+                .isInstanceOf(OrderConfirmedPublishException.class)
+                .hasMessageContaining("outcome=FAILED")
+                .hasMessageContaining("orderId=45")
+                .hasCauseInstanceOf(org.apache.kafka.common.errors.TimeoutException.class)
+                .extracting(e -> ((OrderConfirmedPublishException) e).getOutcome())
+                .isEqualTo(OrderConfirmedPublishException.Outcome.FAILED);
+        }
+
+        @DisplayName("대기 상한 안에 future 가 끝나지 않으면 outcome=UNKNOWN(미확인) 이다. record 는 버퍼에 남아 뒤에서 발행될 수 있다.")
+        @Test
+        void unknown_whenFutureDoesNotCompleteWithinTimeout() {
+            given(template.send(eq(TOPIC), eq("45"), any(byte[].class))).willReturn(new CompletableFuture<>());
+
+            assertThatThrownBy(() -> mockedPublisher.publish(event))
+                .isInstanceOf(OrderConfirmedPublishException.class)
+                .hasMessageContaining("outcome=UNKNOWN")
+                .hasMessageContaining("order-confirmed:v1:45")
+                .extracting(e -> ((OrderConfirmedPublishException) e).getOutcome())
+                .isEqualTo(OrderConfirmedPublishException.Outcome.UNKNOWN);
+        }
     }
 }
