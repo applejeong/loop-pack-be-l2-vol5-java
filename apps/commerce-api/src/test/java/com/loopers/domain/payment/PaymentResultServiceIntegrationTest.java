@@ -3,6 +3,7 @@ package com.loopers.domain.payment;
 import com.loopers.application.order.OrderCommand;
 import com.loopers.application.order.OrderFacade;
 import com.loopers.domain.order.Order;
+import com.loopers.domain.order.OrderConfirmedEvent;
 import com.loopers.domain.order.OrderItem;
 import com.loopers.domain.product.Price;
 import com.loopers.domain.product.Product;
@@ -25,6 +26,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -66,6 +69,7 @@ class PaymentResultServiceIntegrationTest {
     private final StockReservationJpaRepository stockReservationJpaRepository;
     private final JdbcTemplate jdbcTemplate;
     private final DatabaseCleanUp databaseCleanUp;
+    private final TransactionTemplate transactionTemplate;
 
     @Autowired
     public PaymentResultServiceIntegrationTest(
@@ -78,8 +82,10 @@ class PaymentResultServiceIntegrationTest {
         PaymentAttemptJpaRepository paymentAttemptJpaRepository,
         StockReservationJpaRepository stockReservationJpaRepository,
         JdbcTemplate jdbcTemplate,
-        DatabaseCleanUp databaseCleanUp
+        DatabaseCleanUp databaseCleanUp,
+        PlatformTransactionManager transactionManager
     ) {
+        this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.paymentResultService = paymentResultService;
         this.orderFacade = orderFacade;
         this.paymentGateway = paymentGateway;
@@ -119,12 +125,14 @@ class PaymentResultServiceIntegrationTest {
             PaymentFinalResult failed = PaymentFinalResult.failed(PaymentAttempt.FailureReason.PG_FAILED, TRANSACTION_KEY);
 
             // act
-            boolean first = paymentResultService.applyFinal(seed.attemptId(), failed);
-            boolean second = paymentResultService.applyFinal(seed.attemptId(), failed);
+            PaymentApplyResult first = paymentResultService.applyFinal(seed.attemptId(), failed);
+            PaymentApplyResult second = paymentResultService.applyFinal(seed.attemptId(), failed);
 
             // assert
-            assertThat(first).isTrue();
-            assertThat(second).isFalse();
+            assertThat(first.applied()).isTrue();
+            assertThat(first.firstConfirmation()).isNull();
+            assertThat(second.applied()).isFalse();
+            assertThat(second.firstConfirmation()).isNull();
             assertThat(stockOf(seed.productId())).isEqualTo(5);
             assertThat(reservationOf(seed).getStatus()).isEqualTo(StockReservation.Status.RELEASED);
             PaymentAttempt attempt = attemptOf(seed);
@@ -143,18 +151,18 @@ class PaymentResultServiceIntegrationTest {
             // arrange
             Seed seed = seedReservedOrder();
             PaymentFinalResult failed = PaymentFinalResult.failed(PaymentAttempt.FailureReason.PG_FAILED, TRANSACTION_KEY);
-            List<Callable<Boolean>> tasks = new ArrayList<>();
+            List<Callable<PaymentApplyResult>> tasks = new ArrayList<>();
             for (int i = 0; i < 8; i++) {
                 tasks.add(() -> paymentResultService.applyFinal(seed.attemptId(), failed));
             }
 
             // act
-            List<ConcurrentRunner.Run<Boolean>> runs = ConcurrentRunner.runAll(tasks, TIMEOUT);
+            List<ConcurrentRunner.Run<PaymentApplyResult>> runs = ConcurrentRunner.runAll(tasks, TIMEOUT);
 
             // assert
             List<Throwable> errors = runs.stream().filter(ConcurrentRunner.Run::failed).map(ConcurrentRunner.Run::error).toList();
             assertThat(errors).withFailMessage("오류 %d건: %s", errors.size(), errors).isEmpty();
-            long applied = runs.stream().filter(run -> Boolean.TRUE.equals(run.value())).count();
+            long applied = runs.stream().filter(run -> run.value() != null && run.value().applied()).count();
             assertThat(applied).isEqualTo(1);
             assertThat(stockOf(seed.productId())).isEqualTo(5);
             assertThat(reservationOf(seed).getStatus()).isEqualTo(StockReservation.Status.RELEASED);
@@ -170,16 +178,25 @@ class PaymentResultServiceIntegrationTest {
         void doesNotOverwrite_whenFailedArrivesAfterSuccess() {
             // arrange
             Seed seed = seedReservedOrder();
-            assertThat(paymentResultService.applyFinal(seed.attemptId(), PaymentFinalResult.success(TRANSACTION_KEY))).isTrue();
+            PaymentApplyResult first = paymentResultService.applyFinal(seed.attemptId(), PaymentFinalResult.success(TRANSACTION_KEY));
+            assertThat(first.applied()).isTrue();
             assertThat(orderOf(seed).getConfirmedAt().toInstant()).isEqualTo(CONFIRMED_AT);
+            // 1회차 payload: confirmedAt 은 DB 에 저장된 값과 같고, 품목은 저장된 품목(상품 1개 × 2)이다
+            OrderConfirmedEvent payload = first.firstConfirmation();
+            assertThat(payload).isNotNull();
+            assertThat(payload.eventId()).isEqualTo("order-confirmed:v1:" + seed.orderId());
+            assertThat(payload.orderId()).isEqualTo(seed.orderId());
+            assertThat(payload.confirmedAt()).isEqualTo(orderOf(seed).getConfirmedAt().toInstant()).isEqualTo(CONFIRMED_AT);
+            assertThat(payload.items()).containsExactly(new OrderConfirmedEvent.Item(seed.productId(), 2));
             given(clock.instant()).willReturn(NOW.plusSeconds(60));
 
             // act
-            boolean applied = paymentResultService.applyFinal(
+            PaymentApplyResult applied = paymentResultService.applyFinal(
                 seed.attemptId(), PaymentFinalResult.failed(PaymentAttempt.FailureReason.PG_FAILED, TRANSACTION_KEY));
 
-            // assert
-            assertThat(applied).isFalse();
+            // assert - 2회차는 반영도 payload 도 없다
+            assertThat(applied.applied()).isFalse();
+            assertThat(applied.firstConfirmation()).isNull();
             PaymentAttempt attempt = attemptOf(seed);
             assertThat(attempt.getStatus()).isEqualTo(PaymentAttempt.Status.SUCCESS);
             assertThat(attempt.getFailureReason()).isNull();
@@ -197,7 +214,7 @@ class PaymentResultServiceIntegrationTest {
         void ignoresLateCreateResponse_whenAlreadySettled() {
             // arrange
             Seed seed = seedReservedOrder();
-            assertThat(paymentResultService.applyFinal(seed.attemptId(), PaymentFinalResult.success(TRANSACTION_KEY))).isTrue();
+            assertThat(paymentResultService.applyFinal(seed.attemptId(), PaymentFinalResult.success(TRANSACTION_KEY)).applied()).isTrue();
 
             // act
             int pendingRows = paymentResultService.recordPending(seed.attemptId(), "LATE-KEY");
@@ -210,6 +227,33 @@ class PaymentResultServiceIntegrationTest {
             assertThat(attempt.getStatus()).isEqualTo(PaymentAttempt.Status.SUCCESS);
             assertThat(attempt.getTransactionKey()).isEqualTo(TRANSACTION_KEY);
             assertThat(orderOf(seed).getStatus()).isEqualTo(Order.OrderStatus.CONFIRMED);
+        }
+    }
+
+    @DisplayName("같은 TX 에서 주문 엔티티를 먼저 읽어 둔 뒤 적용해도, ")
+    @Nested
+    class OrderAlreadyLoadedInTransaction {
+        @DisplayName("벌크 UPDATE 는 영속성 컨텍스트를 거치지 않아 캐시된 엔티티의 confirmedAt 은 null 로 남지만, payload 는 서비스가 만든 시각을 쓰고 commit 뒤 DB 값과 같다.")
+        @Test
+        void usesServiceClockValue_whenOrderEntityIsCachedInSameTransaction() {
+            // arrange
+            Seed seed = seedReservedOrder();
+
+            // act - 호출자가 TX 를 열고 Order 를 먼저 읽은 상태에서 applyFinal 이 그 TX 에 참여한다
+            PaymentApplyResult applied = transactionTemplate.execute(status -> {
+                assertThat(orderJpaRepository.findById(seed.orderId()).orElseThrow().getConfirmedAt()).isNull();
+                PaymentApplyResult result = paymentResultService.applyFinal(seed.attemptId(), PaymentFinalResult.success(TRANSACTION_KEY));
+                assertThat(orderJpaRepository.findById(seed.orderId()).orElseThrow().getConfirmedAt())
+                    .as("같은 TX 의 캐시된 엔티티는 벌크 UPDATE 결과를 모른다")
+                    .isNull();
+                return result;
+            });
+
+            // assert
+            assertThat(applied.firstConfirmation()).isNotNull();
+            assertThat(applied.firstConfirmation().confirmedAt()).isEqualTo(CONFIRMED_AT);
+            assertThat(orderOf(seed).getConfirmedAt().toInstant()).isEqualTo(CONFIRMED_AT);
+            assertThat(applied.firstConfirmation().items()).containsExactly(new OrderConfirmedEvent.Item(seed.productId(), 2));
         }
     }
 

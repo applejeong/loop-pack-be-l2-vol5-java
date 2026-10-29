@@ -1,6 +1,8 @@
 package com.loopers.domain.payment;
 
 import com.loopers.domain.order.Order;
+import com.loopers.domain.order.OrderConfirmedEvent;
+import com.loopers.domain.order.OrderItem;
 import com.loopers.domain.order.OrderRepository;
 import com.loopers.domain.product.ProductRepository;
 import com.loopers.domain.product.StockReservation;
@@ -81,31 +83,59 @@ class PaymentResultServiceTest {
             given(paymentAttemptRepository.settleIfOpen(ATTEMPT_ID, PaymentAttempt.Status.SUCCESS, null, TRANSACTION_KEY)).willReturn(0);
 
             // act
-            boolean applied = paymentResultService.applyFinal(ATTEMPT_ID, PaymentFinalResult.success(TRANSACTION_KEY));
+            PaymentApplyResult applied = paymentResultService.applyFinal(ATTEMPT_ID, PaymentFinalResult.success(TRANSACTION_KEY));
 
             // assert
-            assertThat(applied).isFalse();
+            assertThat(applied.applied()).isFalse();
+            assertThat(applied.firstConfirmation()).isNull();
             verify(orderRepository, never()).finishIfPaymentPending(anyLong(), any(), anyLong(), any());
             verify(stockReservationRepository, never()).findAllByOrderId(anyLong());
             verify(productRepository, never()).restoreStock(anyLong(), anyInt());
         }
 
-        @DisplayName("SUCCESS 면, 주문을 CONFIRMED + 결제액 + 밀리초로 자른 확정 시각으로 바꾸고 예약을 소비하며 재고는 추가로 건드리지 않는다.")
+        @DisplayName("SUCCESS 면, 주문을 CONFIRMED + 결제액 + 밀리초로 자른 확정 시각으로 바꾸고 예약을 소비하며 재고는 추가로 건드리지 않는다. "
+            + "주문 UPDATE 가 1행이면 DB 품목과 같은 at 으로 만든 발행 payload 를 돌려준다.")
         @Test
         void confirmsOrderAndConsumesReservations_whenSuccess() {
             // arrange
             given(paymentAttemptRepository.settleIfOpen(ATTEMPT_ID, PaymentAttempt.Status.SUCCESS, null, TRANSACTION_KEY)).willReturn(1);
+            given(orderRepository.finishIfPaymentPending(ORDER_ID, Order.OrderStatus.CONFIRMED, 2000L, AT)).willReturn(1);
+            given(orderRepository.findByIdWithItems(ORDER_ID))
+                .willReturn(Optional.of(new Order(1L, List.of(new OrderItem(10L, 2, 1000L)))));
             given(stockReservationRepository.findAllByOrderId(ORDER_ID)).willReturn(List.of(reservation));
 
             // act
-            boolean applied = paymentResultService.applyFinal(ATTEMPT_ID, PaymentFinalResult.success(TRANSACTION_KEY));
+            PaymentApplyResult applied = paymentResultService.applyFinal(ATTEMPT_ID, PaymentFinalResult.success(TRANSACTION_KEY));
 
             // assert
-            assertThat(applied).isTrue();
+            assertThat(applied.applied()).isTrue();
             verify(orderRepository).finishIfPaymentPending(ORDER_ID, Order.OrderStatus.CONFIRMED, 2000L, AT);
             verify(stockReservationRepository).consumeIfReserved(reservation.getId());
             verify(stockReservationRepository, never()).releaseIfReserved(anyLong());
             verify(productRepository, never()).restoreStock(anyLong(), anyInt());
+            OrderConfirmedEvent payload = applied.firstConfirmation();
+            assertThat(payload).isNotNull();
+            assertThat(payload.eventId()).isEqualTo("order-confirmed:v1:100");
+            assertThat(payload.orderId()).isEqualTo(ORDER_ID);
+            assertThat(payload.confirmedAt()).isEqualTo(AT.toInstant());
+            assertThat(payload.items()).containsExactly(new OrderConfirmedEvent.Item(10L, 2));
+        }
+
+        @DisplayName("SUCCESS 인데 주문 UPDATE 가 0행이면(주문은 이미 종결), 시도는 반영되지만 발행 payload 는 없고 품목도 읽지 않는다.")
+        @Test
+        void returnsNoPayload_whenOrderWasAlreadyFinished() {
+            // arrange
+            given(paymentAttemptRepository.settleIfOpen(ATTEMPT_ID, PaymentAttempt.Status.SUCCESS, null, TRANSACTION_KEY)).willReturn(1);
+            given(orderRepository.finishIfPaymentPending(ORDER_ID, Order.OrderStatus.CONFIRMED, 2000L, AT)).willReturn(0);
+            given(stockReservationRepository.findAllByOrderId(ORDER_ID)).willReturn(List.of(reservation));
+
+            // act
+            PaymentApplyResult applied = paymentResultService.applyFinal(ATTEMPT_ID, PaymentFinalResult.success(TRANSACTION_KEY));
+
+            // assert
+            assertThat(applied.applied()).isTrue();
+            assertThat(applied.firstConfirmation()).isNull();
+            verify(orderRepository, never()).findByIdWithItems(anyLong());
         }
 
         @DisplayName("FAILED 면, 주문을 PAYMENT_FAILED·결제액 0 으로 바꾸고 예약 반환이 1행일 때만 재고를 복원한다.")
@@ -119,10 +149,11 @@ class PaymentResultServiceTest {
             given(stockReservationRepository.releaseIfReserved(reservation.getId())).willReturn(1);
 
             // act
-            boolean applied = paymentResultService.applyFinal(ATTEMPT_ID, failed);
+            PaymentApplyResult applied = paymentResultService.applyFinal(ATTEMPT_ID, failed);
 
             // assert
-            assertThat(applied).isTrue();
+            assertThat(applied.applied()).isTrue();
+            assertThat(applied.firstConfirmation()).isNull();
             verify(orderRepository).finishIfPaymentPending(ORDER_ID, Order.OrderStatus.PAYMENT_FAILED, 0L, AT);
             verify(productRepository).restoreStock(10L, 2);
             verify(stockReservationRepository, never()).consumeIfReserved(anyLong());
